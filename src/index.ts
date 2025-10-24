@@ -366,7 +366,7 @@ server.tool(
 // Configure shell type - Tool
 server.tool(
   "set-shell-type",
-  "Configure the shell type used for command execution. Provide paneId to override a specific pane.",
+  "Configure the shell for command execution (bash, zsh, fish, tclsh). Provide paneId to override a specific pane.",
   {
     type: shellTypeSchema,
     paneId: z.string().optional().describe("ID of the tmux pane to override. Omit to change the default shell type.")

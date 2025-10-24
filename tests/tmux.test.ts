@@ -112,7 +112,7 @@ describe("tmux utilities", () => {
     expect(status?.result).toBe("package.json\nREADME.md");
   });
 
-  it("wraps fc_shell commands and preserves Tcl output", async () => {
+  it("wraps tclsh commands and preserves Tcl output", async () => {
     execMock.mockImplementation(async (command) => {
       if (command.includes("capture-pane")) {
         return {
@@ -130,7 +130,7 @@ describe("tmux utilities", () => {
     });
 
     const tmux = await import("../src/tmux.js");
-    tmux.setShellConfig({ type: "fc_shell", paneId: "%0" });
+    tmux.setShellConfig({ type: "tclsh", paneId: "%0" });
 
     const commandId = await tmux.executeCommand("%0", "expr 1+2");
 
@@ -145,11 +145,44 @@ describe("tmux utilities", () => {
     expect(status?.result).toBe("3");
   });
 
-  it("initializes fc_shell helper only once per pane", async () => {
+  it("supports default tclsh shell configuration", async () => {
+    execMock.mockImplementation(async (command) => {
+      if (command.includes("capture-pane")) {
+        return {
+          stdout: [
+            "::tmux_mcp::run {expr 5+6}",
+            "TMUX_MCP_START",
+            "11",
+            "TMUX_MCP_DONE_0"
+          ].join("\n"),
+          stderr: ""
+        };
+      }
+
+      return { stdout: "", stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    tmux.setShellConfig({ type: "tclsh" });
+
+    const commandId = await tmux.executeCommand("%0", "expr 5+6");
+
+    const commandsAfterExecute = execMock.mock.calls.map(([cmd]) => cmd);
+    expect(commandsAfterExecute.some((cmd) => cmd.includes("namespace eval ::tmux_mcp {"))).toBe(true);
+    expect(commandsAfterExecute).toContain("tmux send-keys -t '%0' '::tmux_mcp::run {expr 5+6}' Enter");
+
+    const status = await tmux.checkCommandStatus(commandId);
+
+    expect(status?.status).toBe("completed");
+    expect(status?.exitCode).toBe(0);
+    expect(status?.result).toBe("11");
+  });
+
+  it("initializes tclsh helper only once per pane", async () => {
     execMock.mockImplementation(async () => ({ stdout: "", stderr: "" }));
 
     const tmux = await import("../src/tmux.js");
-    tmux.setShellConfig({ type: "fc_shell", paneId: "%0" });
+    tmux.setShellConfig({ type: "tclsh", paneId: "%0" });
 
     await tmux.executeCommand("%0", "expr 1+2");
     await tmux.executeCommand("%0", "expr 3+4");
@@ -166,7 +199,7 @@ describe("tmux utilities", () => {
 
     const tmux = await import("../src/tmux.js");
 
-    tmux.setShellConfig({ type: "fc_shell", paneId: "%0" });
+    tmux.setShellConfig({ type: "tclsh", paneId: "%0" });
 
     await tmux.executeCommand("%0", "expr 1+2");
     await tmux.executeCommand("%1", "ls");

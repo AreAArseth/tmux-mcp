@@ -7,7 +7,7 @@ Model Context Protocol server that enables Claude Desktop to interact with and v
 - List and search tmux sessions
 - View and navigate tmux windows and panes
 - Capture and expose terminal content from any pane
-- Execute commands in tmux panes and retrieve results (use it at your own risk ⚠️)
+- Execute commands in tmux panes and retrieve results across bash, zsh, fish, and tclsh shells (use it at your own risk ⚠️)
 - Create new tmux sessions and windows
 - Split panes horizontally or vertically with customizable sizes
 - Kill tmux sessions, windows, and panes
@@ -40,7 +40,7 @@ Add this MCP server to your Claude Desktop configuration:
 
 ### MCP server options
 
-You can optionally specify the command line shell you are using, if unspecified it defaults to `bash`
+You can optionally specify the default shell the server should assume when wrapping commands. If unspecified it defaults to `bash`.
 
 ```json
 "mcpServers": {
@@ -51,7 +51,7 @@ You can optionally specify the command line shell you are using, if unspecified 
 }
 ```
 
-The MCP server needs to know the shell only when executing commands, to properly read its exit status.
+The CLI flag only sets the server-wide default. You can still override individual panes (or change the default at runtime) with the `set-shell-type` tool described below. The MCP server needs to know the shell when executing commands so it can wrap and read exit statuses correctly.
 
 ## Available Resources
 
@@ -72,6 +72,6 @@ The MCP server needs to know the shell only when executing commands, to properly
 - `kill-session` - Kill a tmux session by ID
 - `kill-window` - Kill a tmux window by ID
 - `kill-pane` - Kill a tmux pane by ID
+- `set-shell-type` - Configure the shell used for command execution (supports bash, zsh, fish, tclsh). Provide a paneId to override a single pane, or omit to adjust the default.
 - `execute-command` - Execute a command in a tmux pane
 - `get-command-result` - Get the result of an executed command
-
