@@ -192,7 +192,7 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
 
   const startValue = start !== undefined ? String(start) : `-${lines}`;
   const endValue = end !== undefined ? String(end) : '-';
-
+  
   const commandParts = ['capture-pane', '-p'];
 
   if (includeColors) {
@@ -443,18 +443,9 @@ function buildWrappedCommand(command: string, shellType: ShellType): string {
 }
 
 function buildTclshCommand(command: string): string {
-  const escaped = escapeForTcl(command);
-  return `::tmux_mcp::run {${escaped}}`;
+  return `::tmux_mcp::run {${command}}`;
 }
 
-function escapeForTcl(command: string): string {
-  return command
-    .replace(/\\/g, '\\\\')
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n')
-    .replace(/\{/g, '\\{')
-    .replace(/\}/g, '\\}');
-}
 
 async function ensureTclshInitialized(paneId: string): Promise<void> {
   if (tclshInitializedPanes.has(paneId)) {
