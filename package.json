@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node build/index.js",
     "dev": "tsc -w",
+    "test": "vitest run",
     "check-release": "npm run build && npm publish --dry-run",
     "release": "npm run build && npm publish"
   },
@@ -32,6 +33,7 @@
   "devDependencies": {
     "@types/node": "^20.10.5",
     "@types/uuid": "^10.0.0",
+    "vitest": "^1.6.0",
     "typescript": "^5.3.3"
   },
   "repository": {
