@@ -138,18 +138,36 @@ server.tool(
 // Capture pane content - Tool
 server.tool(
   "capture-pane",
-  "Capture content from a tmux pane with configurable lines count and optional color preservation",
+  "Capture content from a tmux pane. Defaults to the last N lines, but you can provide tmux-style start/end offsets (like 0 and -) to walk the full scrollback.",
   {
     paneId: z.string().describe("ID of the tmux pane"),
-    lines: z.string().optional().describe("Number of lines to capture"),
+    lines: z.string().optional().describe("Number of trailing lines to capture when start/end offsets are omitted (defaults to 200)"),
+    start: z.string().optional().describe("tmux -S offset; use 0 for the oldest line or a negative value to offset from the bottom"),
+    end: z.string().optional().describe("tmux -E offset; use - for the newest line or 0 for the active cursor line"),
     colors: z.boolean().optional().describe("Include color/escape sequences for text and background attributes in output")
   },
-  async ({ paneId, lines, colors }) => {
+  async ({ paneId, lines, start, end, colors }) => {
     try {
       // Parse lines parameter if provided
-      const linesCount = lines ? parseInt(lines, 10) : undefined;
-      const includeColors = colors || false;
-      const content = await tmux.capturePaneContent(paneId, linesCount, includeColors);
+      const parsedLines = lines !== undefined ? parseInt(lines, 10) : undefined;
+      const includeColors = colors ?? false;
+      const options: tmux.CapturePaneOptions = {
+        includeColors
+      };
+
+      if (parsedLines !== undefined && !Number.isNaN(parsedLines) && parsedLines > 0) {
+        options.lines = parsedLines;
+      }
+
+      if (start !== undefined && start !== '') {
+        options.start = start;
+      }
+
+      if (end !== undefined && end !== '') {
+        options.end = end;
+      }
+
+      const content = await tmux.capturePaneContent(paneId, options);
       return {
         content: [{
           type: "text",
@@ -550,7 +568,10 @@ server.resource(
       // Ensure paneId is a string
       const paneIdStr = Array.isArray(paneId) ? paneId[0] : paneId;
       // Default to no colors for resources to maintain clean programmatic access
-      const content = await tmux.capturePaneContent(paneIdStr, 200, false);
+      const content = await tmux.capturePaneContent(paneIdStr, {
+        lines: 200,
+        includeColors: false
+      });
       return {
         contents: [{
           uri: uri.href,

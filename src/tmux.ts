@@ -26,6 +26,13 @@ export interface TmuxPane {
   title: string;
 }
 
+export interface CapturePaneOptions {
+  lines?: number;
+  start?: string | number;
+  end?: string | number;
+  includeColors?: boolean;
+}
+
 interface CommandExecution {
   id: string;
   paneId: string;
@@ -175,9 +182,30 @@ export async function listPanes(windowId: string): Promise<TmuxPane[]> {
 /**
  * Capture content from a specific pane, by default the latest 200 lines.
  */
-export async function capturePaneContent(paneId: string, lines: number = 200, includeColors: boolean = false): Promise<string> {
-  const colorFlag = includeColors ? '-e' : '';
-  return executeTmux(`capture-pane -p ${colorFlag} -t '${paneId}' -S -${lines} -E -`);
+export async function capturePaneContent(paneId: string, options: CapturePaneOptions = {}): Promise<string> {
+  const {
+    lines = 200,
+    start,
+    end,
+    includeColors = false
+  } = options;
+
+  const startValue = start !== undefined ? String(start) : `-${lines}`;
+  const endValue = end !== undefined ? String(end) : '-';
+
+  const commandParts = ['capture-pane', '-p'];
+
+  if (includeColors) {
+    commandParts.push('-e');
+  }
+
+  commandParts.push(
+    '-t', `'${paneId}'`,
+    '-S', startValue,
+    '-E', endValue
+  );
+
+  return executeTmux(commandParts.join(' '));
 }
 
 /**
@@ -326,7 +354,7 @@ export async function checkCommandStatus(commandId: string): Promise<CommandExec
 
   if (command.status !== 'pending') return command;
 
-  const content = await capturePaneContent(command.paneId, 1000);
+  const content = await capturePaneContent(command.paneId, { lines: 1000 });
 
   if (command.rawMode) {
     command.result = 'Status tracking unavailable for rawMode commands. Use capture-pane to monitor interactive apps instead.';

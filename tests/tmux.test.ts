@@ -47,6 +47,15 @@ describe("tmux utilities", () => {
     ]);
   });
 
+  it("captures panes with explicit start and end offsets", async () => {
+    execMock.mockImplementationOnce(async () => ({ stdout: "", stderr: "" }));
+
+    const tmux = await import("../src/tmux.js");
+    await tmux.capturePaneContent("%1", { start: "0", end: "-", includeColors: true });
+
+    expect(execMock).toHaveBeenCalledWith("tmux capture-pane -p -e -t '%1' -S 0 -E -");
+  });
+
   it("splits panes with direction and size options", async () => {
     execMock
       .mockImplementationOnce(async () => {
@@ -96,7 +105,7 @@ describe("tmux utilities", () => {
     expect(commands[0]).toBe(
       "tmux send-keys -t '%0' 'echo \"TMUX_MCP_START\"; ls; echo \"TMUX_MCP_DONE_$?\"' Enter"
     );
-    expect(commands[1]).toBe("tmux capture-pane -p  -t '%0' -S -1000 -E -");
+    expect(commands[1]).toBe("tmux capture-pane -p -t '%0' -S -1000 -E -");
     expect(status).not.toBeNull();
     expect(status?.status).toBe("completed");
     expect(status?.exitCode).toBe(0);
