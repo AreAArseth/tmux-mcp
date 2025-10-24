@@ -37,19 +37,43 @@ interface CommandExecution {
   rawMode?: boolean;
 }
 
-export type ShellType = 'bash' | 'zsh' | 'fish';
+export const supportedShellTypes = ['bash', 'zsh', 'fish', 'fc_shell'] as const;
+export type ShellType = typeof supportedShellTypes[number];
 
-let shellConfig: { type: ShellType } = { type: 'bash' };
+type ShellConfigState = {
+  defaultType: ShellType;
+  paneOverrides: Map<string, ShellType>;
+};
 
-export function setShellConfig(config: { type: string }): void {
-  // Validate shell type
-  const validShells: ShellType[] = ['bash', 'zsh', 'fish'];
+const shellConfig: ShellConfigState = {
+  defaultType: 'bash',
+  paneOverrides: new Map()
+};
 
-  if (validShells.includes(config.type as ShellType)) {
-    shellConfig = { type: config.type as ShellType };
-  } else {
-    shellConfig = { type: 'bash' };
+function normalizeShellType(type: string): ShellType {
+  return (supportedShellTypes as readonly string[]).includes(type)
+    ? (type as ShellType)
+    : 'bash';
+}
+
+export function setShellConfig(config: { type: string; paneId?: string }): void {
+  const normalized = normalizeShellType(config.type);
+
+  if (config.paneId) {
+    shellConfig.paneOverrides.set(config.paneId, normalized);
+    // Reset cached initialization so the helper can be installed on demand
+    fcShellInitializedPanes.delete(config.paneId);
+    return;
   }
+
+  shellConfig.defaultType = normalized;
+  if (normalized !== 'fc_shell') {
+    fcShellInitializedPanes.clear();
+  }
+}
+
+function resolveShellType(paneId: string): ShellType {
+  return shellConfig.paneOverrides.get(paneId) ?? shellConfig.defaultType;
 }
 
 /**
@@ -239,17 +263,26 @@ const activeCommands = new Map<string, CommandExecution>();
 const startMarkerText = 'TMUX_MCP_START';
 const endMarkerPrefix = "TMUX_MCP_DONE_";
 
+// Track fc_shell initialization per pane to keep terminal output minimal
+const fcShellInitializedPanes = new Set<string>();
+
 // Execute a command in a tmux pane and track its execution
 export async function executeCommand(paneId: string, command: string, rawMode?: boolean, noEnter?: boolean): Promise<string> {
   // Generate unique ID for this command execution
   const commandId = uuidv4();
 
+  const shellType = resolveShellType(paneId);
+
   let fullCommand: string;
   if (rawMode || noEnter) {
     fullCommand = command;
   } else {
-    const endMarkerText = getEndMarkerText();
-    fullCommand = `echo "${startMarkerText}"; ${command}; echo "${endMarkerText}"`;
+    if (shellType === 'fc_shell') {
+      await ensureFcShellInitialized(paneId);
+      fullCommand = buildFcShellCommand(command);
+    } else {
+      fullCommand = buildWrappedCommand(command, shellType);
+    }
   }
 
   // Store command in tracking map
@@ -324,7 +357,15 @@ export async function checkCommandStatus(commandId: string): Promise<CommandExec
     const outputStart = startIndex + startMarkerText.length;
     const outputContent = content.substring(outputStart, endIndex).trim();
 
-    command.result = outputContent.substring(outputContent.indexOf('\n') + 1).trim();
+    const outputLines = outputContent ? outputContent.split('\n') : [];
+    if (outputLines.length > 0) {
+      const firstLine = outputLines[0].trim();
+      if (firstLine === command.command.trim()) {
+        outputLines.shift();
+      }
+    }
+
+    command.result = outputLines.join('\n').trim();
 
     // Update in map
     activeCommands.set(commandId, command);
@@ -356,9 +397,59 @@ export function cleanupOldCommands(maxAgeMinutes: number = 60): void {
   }
 }
 
-function getEndMarkerText(): string {
-  return shellConfig.type === 'fish'
-    ? `${endMarkerPrefix}$status`
-    : `${endMarkerPrefix}$?`;
+function getEndMarkerText(shellType: ShellType): string {
+  if (shellType === 'fish') {
+    return `${endMarkerPrefix}$status`;
+  }
+
+  if (shellType === 'fc_shell') {
+    return `${endMarkerPrefix}$::tmux_mcp_status`;
+  }
+
+  return `${endMarkerPrefix}$?`;
 }
 
+function buildWrappedCommand(command: string, shellType: ShellType): string {
+  const endMarkerText = getEndMarkerText(shellType);
+  return `echo "${startMarkerText}"; ${command}; echo "${endMarkerText}"`;
+}
+
+function buildFcShellCommand(command: string): string {
+  const escaped = escapeForTcl(command);
+  return `::tmux_mcp::run {${escaped}}`;
+}
+
+function escapeForTcl(command: string): string {
+  return command
+    .replace(/\\/g, '\\\\')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\{/g, '\\{')
+    .replace(/\}/g, '\\}');
+}
+
+async function ensureFcShellInitialized(paneId: string): Promise<void> {
+  if (fcShellInitializedPanes.has(paneId)) {
+    return;
+  }
+
+  const definitionCommand = [
+    'namespace eval ::tmux_mcp {',
+    'proc run {cmd} {',
+    `puts "${startMarkerText}";`,
+    'set status [catch {uplevel #0 $cmd} result opts];',
+    'if {$status == 0} {',
+    'if {[info exists result] && $result ne ""} { puts $result }',
+    '} else {',
+    'if {[info exists opts(-errorinfo)]} { puts $opts(-errorinfo) } else { puts $result }',
+    '};',
+    `puts "${endMarkerPrefix}$status"`,
+    '}',
+    '}'
+  ].join(' ');
+
+  const escapedCommand = definitionCommand.replace(/'/g, "'\\''");
+  await executeTmux(`send-keys -t '${paneId}' '${escapedCommand}' Enter`);
+
+  fcShellInitializedPanes.add(paneId);
+}

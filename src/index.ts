@@ -23,6 +23,8 @@ const server = new McpServer({
   }
 });
 
+const shellTypeSchema = z.enum(tmux.supportedShellTypes);
+
 // List all tmux sessions - Tool
 server.tool(
   "list-sessions",
@@ -336,6 +338,36 @@ server.tool(
         content: [{
           type: "text",
           text: `Error splitting pane: ${error}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Configure shell type - Tool
+server.tool(
+  "set-shell-type",
+  "Configure the shell type used for command execution. Provide paneId to override a specific pane.",
+  {
+    type: shellTypeSchema,
+    paneId: z.string().optional().describe("ID of the tmux pane to override. Omit to change the default shell type.")
+  },
+  async ({ type, paneId }) => {
+    try {
+      tmux.setShellConfig({ type, paneId });
+      const target = paneId ? `pane ${paneId}` : 'default';
+      return {
+        content: [{
+          type: "text",
+          text: `Shell type for ${target} set to ${type}`
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error setting shell type: ${error}`
         }],
         isError: true
       };
