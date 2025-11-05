@@ -181,6 +181,8 @@ export async function listPanes(windowId: string): Promise<TmuxPane[]> {
 
 /**
  * Capture content from a specific pane, by default the latest 200 lines.
+ * Note: tmux's -S and -E flags are unreliable due to cursor position,
+ * so we capture a range and slice in JavaScript.
  */
 export async function capturePaneContent(paneId: string, options: CapturePaneOptions = {}): Promise<string> {
   const {
@@ -190,9 +192,16 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
     includeColors = false
   } = options;
 
-  const startValue = start !== undefined ? String(start) : `-${lines}`;
-  const endValue = end !== undefined ? String(end) : '-';
-  
+  // Determine start value for tmux capture
+  // We'll use this to capture enough data, then slice accurately
+  let tmuxStart: string;
+  if (start !== undefined) {
+    tmuxStart = String(start);
+  } else {
+    // Default: capture the last N lines from history
+    tmuxStart = `-${lines}`;
+  }
+
   const commandParts = ['capture-pane', '-p'];
 
   if (includeColors) {
@@ -201,11 +210,37 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
 
   commandParts.push(
     '-t', `'${paneId}'`,
-    '-S', startValue,
-    '-E', endValue
+    '-S', tmuxStart,
+    '-E', '-'  // Always use '-' for end because specific line numbers are unreliable
   );
 
-  return executeTmux(commandParts.join(' '));
+  const capturedLines = await executeTmux(commandParts.join(' '));
+
+  // Now slice the output in JavaScript for accurate results
+  const linesArray = capturedLines.split('\n');
+
+  // Calculate actual slice indices
+  let sliceStart = 0;
+  let sliceEnd = linesArray.length;
+
+  // Handle start parameter
+  if (start !== undefined) {
+    const startNum = typeof start === 'number' ? start : parseInt(start, 10);
+    // Negative values count from end
+    sliceStart = startNum < 0 ? Math.max(0, linesArray.length + startNum) : 0;
+  } else if (lines !== undefined) {
+    // If no start specified but lines is, take last N lines
+    sliceStart = Math.max(0, linesArray.length - lines);
+  }
+
+  // Handle end parameter
+  if (end !== undefined) {
+    const endNum = typeof end === 'number' ? end : parseInt(end, 10);
+    // Negative values count from end
+    sliceEnd = endNum < 0 ? linesArray.length + endNum + 1 : endNum + 1;
+  }
+
+  return linesArray.slice(sliceStart, sliceEnd).join('\n');
 }
 
 /**

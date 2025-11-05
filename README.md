@@ -65,7 +65,7 @@ The CLI flag only sets the server-wide default. You can still override individua
 - `find-session` - Find a tmux session by name
 - `list-windows` - List windows in a tmux session
 - `list-panes` - List panes in a tmux window
-- `capture-pane` - Capture content from a tmux pane
+- `capture-pane` - Capture content from a tmux pane with optional slicing (supports start/end offsets to walk full scrollback history)
 - `create-session` - Create a new tmux session
 - `create-window` - Create a new window in a tmux session
 - `split-pane` - Split a tmux pane horizontally or vertically with optional size
