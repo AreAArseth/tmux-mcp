@@ -9,7 +9,7 @@ import * as tmux from "./tmux.js";
 // Create MCP server
 const server = new McpServer({
   name: "tmux-mcp",
-  version: "0.2.2"
+  version: "0.3.1" // Keep in sync with package.json
 }, {
   capabilities: {
     resources: {
@@ -189,11 +189,11 @@ server.tool(
 // Create new session - Tool
 server.tool(
   "create-session",
-  "Create a new tmux session",
+  "Create a new tmux session (optionally minimal to skip startup scripts)",
   {
     name: z.string().describe("Name for the new tmux session"),
-    minimal: z.boolean().optional().describe("Launch with a minimal shell (bash --noprofile --norc) to skip startup scripts for speed"),
-    shellCommand: z.string().optional().describe("Custom shell command to run instead of default login shell (ignored if minimal=true unless explicitly provided). Examples: 'bash --noprofile --norc', 'zsh -f'")
+  minimal: z.boolean().optional().describe("Launch with a minimal shell (bash --noprofile --norc) to skip startup scripts for speed."),
+  shellCommand: z.string().optional().describe("Custom shell command in the new session. If minimal=true and shellCommand provided, it overrides the default minimal bash. Examples: 'bash --noprofile --norc', 'zsh -f'"),
   },
   async ({ name, minimal, shellCommand }) => {
     try {
@@ -531,11 +531,20 @@ server.tool(
       // If completed we may want a sliced result
       if (status.status !== 'pending' && (lines !== undefined || start !== undefined || end !== undefined)) {
         const refreshed = await tmux.checkCommandStatus(commandId, { lines, start, end });
-        if (refreshed) status.result = refreshed.result; // adopt sliced result
+        if (refreshed) {
+          // Adopt sliced result and metadata for consistency with get-command-result
+          status.result = refreshed.result;
+          status.returnedLines = refreshed.returnedLines;
+            status.lineStartIndex = refreshed.lineStartIndex;
+            status.lineEndIndex = refreshed.lineEndIndex;
+            status.truncated = refreshed.truncated;
+            status.totalLines = refreshed.totalLines;
+            status.outputLines = refreshed.outputLines;
+        }
       }
       const meta: string[] = [
         `Status: ${status.status}`,
-        `Exit code: ${status.exitCode}`,
+        `Exit code: ${status.exitCode ?? 'n/a'}`,
         `Command: ${status.command}`
       ];
       if (status.truncated) {
