@@ -40,16 +40,7 @@ describeIfTmux("tmux integration", () => {
   let primaryWindowId: string | null = null;
   let primaryPaneId: string | null = null;
 
-  async function waitForCommandCompletion(commandId: string) {
-    let status = await tmux.checkCommandStatus(commandId);
-
-    for (let attempt = 0; attempt < 20 && status?.status === "pending"; attempt++) {
-      await delay(200);
-      status = await tmux.checkCommandStatus(commandId);
-    }
-
-    return status;
-  }
+  const waitForCommandCompletion = (commandId: string) => tmux.waitForCompletion(commandId, 10000, 150);
 
   async function waitForTclPrompt(): Promise<boolean> {
     if (!primaryPaneId) {
@@ -222,7 +213,7 @@ describeIfTmux("tmux integration", () => {
     expect(status).not.toBeNull();
     expect(status?.status).toBe("completed");
     expect(status?.result).toBe("9");
-  });
+  }, 15000);
 
   (tclshAvailable ? it : it.skip)("reports tclsh command errors", async () => {
     expect(primaryPaneId).not.toBeNull();
@@ -243,5 +234,34 @@ describeIfTmux("tmux integration", () => {
     expect(status?.status).toBe("error");
     expect(status?.exitCode).toBe(1);
     expect(status?.result ?? "").toContain("divide by zero");
-  });
+  }, 15000);
+
+  it("captures distinct outputs for multiple sequential commands", async () => {
+    expect(primaryPaneId).not.toBeNull();
+    if (!primaryPaneId) return;
+
+    // Execute three commands one after another, waiting only after all started
+    const id1 = await tmux.executeCommand(primaryPaneId, "echo first-marker");
+    const id2 = await tmux.executeCommand(primaryPaneId, "echo second-marker");
+    const id3 = await tmux.executeCommand(primaryPaneId, "echo third-marker");
+
+    // Wait for each to complete in order
+    const s1 = await waitForCommandCompletion(id1);
+    const s2 = await waitForCommandCompletion(id2);
+    const s3 = await waitForCommandCompletion(id3);
+
+    expect(s1?.status).toBe("completed");
+    expect(s2?.status).toBe("completed");
+    expect(s3?.status).toBe("completed");
+    expect(s1?.result).toContain("first-marker");
+    expect(s2?.result).toContain("second-marker");
+    expect(s3?.result).toContain("third-marker");
+    // Ensure outputs are not mixed (each should only contain its own marker string)
+    expect(s1?.result?.includes("second-marker")).toBe(false);
+    expect(s1?.result?.includes("third-marker")).toBe(false);
+    expect(s2?.result?.includes("first-marker")).toBe(false);
+    expect(s2?.result?.includes("third-marker")).toBe(false);
+    expect(s3?.result?.includes("first-marker")).toBe(false);
+    expect(s3?.result?.includes("second-marker")).toBe(false);
+  }, 15000);
 });
