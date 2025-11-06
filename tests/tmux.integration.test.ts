@@ -65,7 +65,7 @@ describeIfTmux("tmux integration", () => {
 
   beforeAll(async () => {
     tmux.setShellConfig({ type: "bash" });
-    session = await tmux.createSession(sessionName);
+  session = await tmux.createSession(sessionName, { minimal: true });
     expect(session).not.toBeNull();
     if (!session) return;
 
@@ -90,6 +90,7 @@ describeIfTmux("tmux integration", () => {
       await delay(100);
     }
     expect(primaryPaneId).not.toBeNull();
+
   });
 
   afterAll(async () => {
@@ -143,7 +144,8 @@ describeIfTmux("tmux integration", () => {
     if (!primaryPaneId) return;
 
     tmux.setShellConfig({ type: "bash", paneId: primaryPaneId });
-    const commandId = await tmux.executeCommand(primaryPaneId, "bash -lc \"echo 'stderr-only' 1>&2\"");
+  // Avoid spawning a login shell; run directly in existing pane shell
+  const commandId = await tmux.executeCommand(primaryPaneId, "echo 'stderr-only' 1>&2");
     const status = await waitForCommandCompletion(commandId);
 
     expect(status).not.toBeNull();
@@ -157,7 +159,8 @@ describeIfTmux("tmux integration", () => {
     if (!primaryPaneId) return;
 
     tmux.setShellConfig({ type: "bash", paneId: primaryPaneId });
-    const commandId = await tmux.executeCommand(primaryPaneId, "bash -lc \"echo 'failure' 1>&2; exit 17\"");
+  // Use a subshell so exit doesn't terminate the pane shell
+  const commandId = await tmux.executeCommand(primaryPaneId, "(echo 'failure' 1>&2; exit 17)");
     const status = await waitForCommandCompletion(commandId);
 
     expect(status).not.toBeNull();
@@ -171,7 +174,8 @@ describeIfTmux("tmux integration", () => {
     if (!primaryPaneId) return;
 
     tmux.setShellConfig({ type: "bash", paneId: primaryPaneId });
-    const commandId = await tmux.executeCommand(primaryPaneId, "bash -lc \"exit 123\"");
+  // Use subshell for non-zero exit code without output
+  const commandId = await tmux.executeCommand(primaryPaneId, "(exit 123)");
     const status = await waitForCommandCompletion(commandId);
 
     expect(status).not.toBeNull();

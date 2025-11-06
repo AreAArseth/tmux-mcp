@@ -270,8 +270,17 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
 /**
  * Create a new tmux session
  */
-export async function createSession(name: string): Promise<TmuxSession | null> {
-  await executeTmux(`new-session -d -s "${name}"`);
+export async function createSession(name: string, options?: { minimal?: boolean; shellCommand?: string }): Promise<TmuxSession | null> {
+  // Allow launching with a minimal shell to skip startup scripts.
+  let launchCmd = `new-session -d -s "${name}"`;
+  if (options?.minimal) {
+    const shell = options.shellCommand || 'bash --noprofile --norc';
+    // Quote shell command separately so user shell isn't expanded prematurely.
+    launchCmd += ` '${shell.replace(/'/g, "'\\''")}'`;
+  } else if (options?.shellCommand) {
+    launchCmd += ` '${options.shellCommand.replace(/'/g, "'\\''")}'`;
+  }
+  await executeTmux(launchCmd);
   return findSessionByName(name);
 }
 
@@ -645,4 +654,27 @@ export function grepCommandOutput(commandId: string, pattern: string, flags?: st
     return [];
   }
   return command.outputLines.filter(line => regex.test(line));
+}
+
+// Switch pane to a minimal shell variant (bash only for now) to skip heavy startup scripts.
+export async function switchPaneToMinimalShell(paneId: string): Promise<boolean> {
+  const shellType = resolveShellType(paneId);
+  if (shellType !== 'bash') {
+    return false; // Only implemented for bash currently
+  }
+  // Use exec to replace current shell, suppress profile and rc loading.
+  await executeTmux(`send-keys -t '${paneId}' 'exec bash --noprofile --norc' Enter`);
+  // Emit a readiness marker after replacement
+  await executeTmux(`send-keys -t '${paneId}' 'echo MINIMAL_READY' Enter`);
+  // Poll for readiness marker appearing in last captured lines
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const tail = await capturePaneContent(paneId, { lines: 50 });
+    if (tail.split('\n').some(l => l.includes('MINIMAL_READY'))) {
+      debug('switchPaneToMinimalShell: minimal shell ready');
+      return true;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  debug('switchPaneToMinimalShell: timeout waiting for readiness');
+  return false;
 }
