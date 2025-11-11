@@ -36,7 +36,10 @@
     "vitest": "^1.6.0",
     "typescript": "^5.3.3"
   },
-  "repository": "github:AreAArseth/tmux-mcp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AreAArseth/tmux-mcp.git"
+  },
   "bugs": {
     "url": "https://github.com/AreAArseth/tmux-mcp/issues"
   },
