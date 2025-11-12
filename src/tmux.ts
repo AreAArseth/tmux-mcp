@@ -42,6 +42,34 @@ export interface CapturePaneOptions {
   includeColors?: boolean;
 }
 
+type CaptureIndexInfo =
+  | { kind: 'none' }
+  | { kind: 'dash' }
+  | { kind: 'absolute'; value: number }
+  | { kind: 'relative'; value: number };
+
+function interpretCaptureIndex(value: string | number | undefined): CaptureIndexInfo {
+  if (value === undefined) {
+    return { kind: 'none' };
+  }
+
+  if (value === '-') {
+    return { kind: 'dash' };
+  }
+
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (Number.isNaN(numeric)) {
+    return { kind: 'none' };
+  }
+
+  const normalized = Math.trunc(numeric);
+  if (normalized >= 0) {
+    return { kind: 'absolute', value: normalized };
+  }
+
+  return { kind: 'relative', value: normalized };
+}
+
 interface CommandExecution {
   id: string;
   paneId: string;
@@ -206,8 +234,10 @@ export async function listPanes(windowId: string): Promise<TmuxPane[]> {
 
 /**
  * Capture content from a specific pane, by default the latest 200 lines.
- * Note: tmux's -S and -E flags are unreliable due to cursor position,
- * so we capture a range and slice in JavaScript.
+ * Note: tmux's -S and -E flags are unreliable due to cursor position.
+ * We treat tmux start/end offsets as hints, rely on JavaScript slicing for
+ * relative (negative) offsets, and avoid re-applying positive offsets that
+ * tmux already honored to prevent double trimming.
  */
 export async function capturePaneContent(paneId: string, options: CapturePaneOptions = {}): Promise<string> {
   const {
@@ -246,66 +276,45 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
 
   // Now slice the output in JavaScript for accurate results
   const linesArray = capturedLines.split('\n');
+  const startInfo = interpretCaptureIndex(start);
+  const endInfo = interpretCaptureIndex(end);
 
   // Calculate actual slice indices
   let sliceStart = 0;
   let sliceEnd = linesArray.length;
+  const absoluteStartBase = startInfo.kind === 'absolute'
+    ? startInfo.value
+    : startInfo.kind === 'dash'
+      ? 0
+      : undefined;
 
-  const resolveEndIndex = (value: string | number | undefined): number => {
-    if (value === undefined) {
-      if (lines !== undefined && lines > 0 && start === undefined) {
-        return linesArray.length;
-      }
-      return sliceEnd;
-    }
-
-    const normalized = typeof value === 'number'
-      ? value
-      : value === '-'
-        ? linesArray.length - 1
-        : Number(value);
-
-    if (Number.isNaN(normalized)) {
-      return linesArray.length;
-    }
-
-    if (normalized < 0) {
-      return Math.max(0, linesArray.length + normalized + 1);
-    }
-
-    return Math.min(linesArray.length, normalized + 1);
-  };
-
-  if (start !== undefined) {
-    const startValue = typeof start === 'number'
-      ? start
-      : start === '-'
-        ? 0
-        : Number(start);
-
-    if (!Number.isNaN(startValue)) {
-      sliceStart = startValue < 0
-        ? Math.max(0, linesArray.length + startValue)
-        : Math.min(linesArray.length, startValue);
-    }
+  if (startInfo.kind === 'relative') {
+    sliceStart = Math.max(0, linesArray.length + startInfo.value);
+  } else if (startInfo.kind === 'absolute' || startInfo.kind === 'dash') {
+    sliceStart = 0;
   } else if (lines !== undefined && lines > 0) {
     sliceStart = Math.max(0, linesArray.length - lines);
   }
 
-  if (end !== undefined) {
-    const endValue = typeof end === 'number'
-      ? end
-      : end === '-'
-        ? linesArray.length - 1
-        : Number(end);
-
-    if (Number.isNaN(endValue)) {
-      sliceEnd = linesArray.length;
-    } else if (endValue < 0) {
-      sliceEnd = Math.max(0, linesArray.length + endValue + 1);
+  if (endInfo.kind === 'dash') {
+    sliceEnd = linesArray.length;
+  } else if (endInfo.kind === 'relative') {
+    sliceEnd = Math.max(0, linesArray.length + endInfo.value + 1);
+  } else if (endInfo.kind === 'absolute') {
+    if (absoluteStartBase !== undefined) {
+      const desiredLength = endInfo.value - absoluteStartBase + 1;
+      if (desiredLength <= 0) {
+        sliceEnd = sliceStart;
+      } else {
+        sliceEnd = Math.min(linesArray.length, sliceStart + desiredLength);
+      }
     } else {
-      sliceEnd = Math.min(linesArray.length, endValue + 1);
+      sliceEnd = Math.min(linesArray.length, endInfo.value + 1);
     }
+  }
+
+  if (end === undefined && lines !== undefined && lines > 0) {
+    sliceEnd = Math.min(sliceEnd, sliceStart + lines);
   }
 
   if (sliceEnd < sliceStart) {
@@ -667,8 +676,9 @@ function buildWrappedCommand(command: string, shellType: ShellType, seq: number)
   // End marker uses shell-specific exit variable but includes sequence
   // For fish, use braces to prevent variable name ambiguity (e.g., $status_1 would be interpreted as variable 'status_1')
   const exitVar = shellType === 'fish' ? '$status' : '$?';
+  const fishExitWrapped = `{${exitVar}}`;
   const wrapped = shellType === 'fish'
-    ? `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_"{$exitVar}"_${seq}"`
+    ? `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_"${fishExitWrapped}"_${seq}"`
     : `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${seq}"`;
   debug('buildWrappedCommand', { shellType, seq, wrapped });
   return wrapped;

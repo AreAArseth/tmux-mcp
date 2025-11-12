@@ -57,16 +57,16 @@ describe("tmux utilities", () => {
     expect(execMock).toHaveBeenCalledWith("tmux capture-pane -p -e -t '%1' -S 0 -E -");
   });
 
-  it("slices captured pane output correctly for numeric start and '-' end", async () => {
+  it("returns tmux-provided range when positive start offset already applied", async () => {
     execMock.mockImplementationOnce(async () => ({
-      stdout: ["prompt>", "line-0", "line-1", "line-2", "line-3"].join("\n"),
+      stdout: ["line-2", "line-3", "line-4"].join("\n"),
       stderr: ""
     }));
 
     const tmux = await import("../src/tmux.js");
     const content = await tmux.capturePaneContent("%1", { start: 2, end: "-" });
 
-    expect(content).toBe(["line-1", "line-2", "line-3"].join("\n"));
+    expect(content).toBe(["line-2", "line-3", "line-4"].join("\n"));
   });
 
   it("splits panes with direction and size options", async () => {
@@ -384,7 +384,7 @@ describe("tmux utilities", () => {
   it("respects positive start values when capturing pane content (Bug Fix #1)", async () => {
     execMock.mockImplementationOnce(async () => {
       const lines: string[] = [];
-      for (let i = 0; i < 50; i++) {
+      for (let i = 10; i < 25; i++) {
         lines.push(`line-${i}`);
       }
       return { stdout: lines.join("\n"), stderr: "" };
@@ -398,6 +398,18 @@ describe("tmux utilities", () => {
     expect(capturedLines).toHaveLength(5); // lines 10-14 inclusive
     expect(capturedLines[0]).toBe("line-10");
     expect(capturedLines[4]).toBe("line-14");
+  });
+
+  it("trims to requested tail when tmux over-captures for negative offsets", async () => {
+    execMock.mockImplementationOnce(async () => ({
+      stdout: ["line-40", "line-41", "line-42", "line-43", "line-44", "line-45", "line-46"].join("\n"),
+      stderr: ""
+    }));
+
+    const tmux = await import("../src/tmux.js");
+    const content = await tmux.capturePaneContent("%0", { start: -5, end: "-" });
+
+    expect(content).toBe(["line-42", "line-43", "line-44", "line-45", "line-46"].join("\n"));
   });
 
   // BUG FIX TEST 2: Shell injection prevention in createSession
