@@ -90,7 +90,6 @@ describeIfTmux("tmux integration", () => {
       await delay(100);
     }
     expect(primaryPaneId).not.toBeNull();
-
   });
 
   afterAll(async () => {
@@ -109,6 +108,29 @@ describeIfTmux("tmux integration", () => {
     if (!session) return;
     const sessions = await tmux.listSessions();
     expect(sessions.some((s) => s.name === sessionName)).toBe(true);
+  });
+
+  it("verifies minimal shell option skipped startup scripts", async () => {
+    expect(primaryPaneId).not.toBeNull();
+    if (!primaryPaneId) return;
+
+    // Test that bash was started with --noprofile --norc
+    // Check that BASH_ENV is unset (would be set if .bashrc was sourced)
+    // and that common customizations aren't present
+    const commandId = await tmux.executeCommand(primaryPaneId, "echo \"BASH_ENV=${BASH_ENV:-unset}\"");
+    const status = await waitForCommandCompletion(commandId);
+
+    expect(status).not.toBeNull();
+    expect(status?.status).toBe("completed");
+    expect(status?.result ?? "").toContain("BASH_ENV=unset");
+
+    // Additionally verify that a typical .bashrc alias doesn't exist
+    // (e.g., 'll' is commonly aliased to 'ls -l' in many default .bashrc files)
+    const aliasCheckId = await tmux.executeCommand(primaryPaneId, "type ll 2>&1 || echo 'll: not found'");
+    const aliasStatus = await waitForCommandCompletion(aliasCheckId);
+
+    expect(aliasStatus).not.toBeNull();
+    expect(aliasStatus?.result ?? "").toMatch(/ll.*not found/);
   });
 
   it("creates and lists windows and panes", async () => {
