@@ -138,14 +138,24 @@ export async function listSessions(): Promise<TmuxSession[]> {
   if (!output) return [];
 
   return output.split('\n').map(line => {
-    const [id, name, attached, windows] = line.split(':');
+    // Handle colons in session names by splitting with limit and reconstructing
+    const parts = line.split(':');
+    if (parts.length < 4) {
+      // Invalid format, skip this line
+      return null;
+    }
+    const id = parts[0];
+    const name = parts.slice(1, -2).join(':'); // Rejoin middle parts in case name contains colons
+    const attached = parts[parts.length - 2];
+    const windows = parts[parts.length - 1];
+    const windowsCount = parseInt(windows, 10);
     return {
       id,
       name,
       attached: attached === '1',
-      windows: parseInt(windows, 10)
+      windows: Number.isNaN(windowsCount) ? 0 : windowsCount
     };
-  });
+  }).filter((session): session is TmuxSession => session !== null);
 }
 
 /**
@@ -170,14 +180,22 @@ export async function listWindows(sessionId: string): Promise<TmuxWindow[]> {
   if (!output) return [];
 
   return output.split('\n').map(line => {
-    const [id, name, active] = line.split(':');
+    // Handle colons in window names by splitting and reconstructing
+    const parts = line.split(':');
+    if (parts.length < 3) {
+      // Invalid format, skip this line
+      return null;
+    }
+    const id = parts[0];
+    const name = parts.slice(1, -1).join(':'); // Rejoin middle parts in case name contains colons
+    const active = parts[parts.length - 1];
     return {
       id,
       name,
       active: active === '1',
       sessionId
     };
-  });
+  }).filter((window): window is TmuxWindow => window !== null);
 }
 
 /**
@@ -190,14 +208,22 @@ export async function listPanes(windowId: string): Promise<TmuxPane[]> {
   if (!output) return [];
 
   return output.split('\n').map(line => {
-    const [id, title, active] = line.split(':');
+    // Handle colons in pane titles by splitting and reconstructing
+    const parts = line.split(':');
+    if (parts.length < 3) {
+      // Invalid format, skip this line
+      return null;
+    }
+    const id = parts[0];
+    const title = parts.slice(1, -1).join(':'); // Rejoin middle parts in case title contains colons
+    const active = parts[parts.length - 1];
     return {
       id,
       windowId,
       title: title,
       active: active === '1'
     };
-  });
+  }).filter((pane): pane is TmuxPane => pane !== null);
 }
 
 /**
@@ -250,8 +276,10 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   // Handle start parameter
   if (start !== undefined) {
     const startNum = typeof start === 'number' ? start : parseInt(start, 10);
-    // Negative values count from end
-    sliceStart = startNum < 0 ? Math.max(0, linesArray.length + startNum) : 0;
+    if (!Number.isNaN(startNum)) {
+      // Negative values count from end
+      sliceStart = startNum < 0 ? Math.max(0, linesArray.length + startNum) : Math.max(0, startNum);
+    }
   } else if (lines !== undefined && lines > 0) {
     // If no start specified but lines is, take last N lines
     sliceStart = Math.max(0, linesArray.length - lines);
@@ -260,8 +288,10 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   // Handle end parameter
   if (end !== undefined) {
     const endNum = typeof end === 'number' ? end : parseInt(end, 10);
-    // Negative values count from end
-    sliceEnd = endNum < 0 ? linesArray.length + endNum + 1 : endNum + 1;
+    if (!Number.isNaN(endNum)) {
+      // Negative values count from end
+      sliceEnd = endNum < 0 ? linesArray.length + endNum + 1 : endNum + 1;
+    }
   }
 
   return linesArray.slice(sliceStart, sliceEnd).join('\n');
@@ -371,7 +401,8 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
 
   const shellType = resolveShellType(paneId);
 
-  const sequenceNumber = (!rawMode && !noEnter) ? (wrappedCommandSequenceCounter + 1) : undefined;
+  // Increment sequence counter atomically before use to prevent race conditions
+  const sequenceNumber = (!rawMode && !noEnter) ? (++wrappedCommandSequenceCounter) : undefined;
   debug('executeCommand: preparing', { paneId, command, rawMode, noEnter, shellType, sequenceNumber });
   let fullCommand: string;
   if (rawMode || noEnter) {
@@ -384,11 +415,6 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
       fullCommand = buildWrappedCommand(command, shellType, sequenceNumber!);
     }
   debug('executeCommand: wrapped command', fullCommand);
-  }
-
-  // Store command in tracking map
-  if (sequenceNumber) {
-    wrappedCommandSequenceCounter = sequenceNumber; // commit increment
   }
   debug('executeCommand: sending keys', { paneId, fullCommand, noEnter });
 
