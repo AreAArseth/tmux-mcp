@@ -4,6 +4,15 @@ import { v4 as uuidv4 } from 'uuid';
 
 const exec = promisify(execCallback);
 
+// Debug helper (enable by setting env TMUX_MCP_DEBUG=1 when launching server)
+const DEBUG_ENABLED = process.env.TMUX_MCP_DEBUG === '1';
+function debug(...args: any[]) {
+  if (DEBUG_ENABLED) {
+    // stderr to avoid interfering with captured pane content
+    console.error('[tmux-mcp-debug]', ...args);
+  }
+}
+
 // Basic interfaces for tmux objects
 export interface TmuxSession {
   id: string;
@@ -26,6 +35,41 @@ export interface TmuxPane {
   title: string;
 }
 
+export interface CapturePaneOptions {
+  lines?: number;
+  start?: string | number;
+  end?: string | number;
+  includeColors?: boolean;
+}
+
+type CaptureIndexInfo =
+  | { kind: 'none' }
+  | { kind: 'dash' }
+  | { kind: 'absolute'; value: number }
+  | { kind: 'relative'; value: number };
+
+function interpretCaptureIndex(value: string | number | undefined): CaptureIndexInfo {
+  if (value === undefined) {
+    return { kind: 'none' };
+  }
+
+  if (value === '-') {
+    return { kind: 'dash' };
+  }
+
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (Number.isNaN(numeric)) {
+    return { kind: 'none' };
+  }
+
+  const normalized = Math.trunc(numeric);
+  if (normalized >= 0) {
+    return { kind: 'absolute', value: normalized };
+  }
+
+  return { kind: 'relative', value: normalized };
+}
+
 interface CommandExecution {
   id: string;
   paneId: string;
@@ -35,21 +79,61 @@ interface CommandExecution {
   result?: string;
   exitCode?: number;
   rawMode?: boolean;
+  // Full untrimmed output between markers (without echoed command line)
+  fullResult?: string;
+  // Output lines array cached for slicing and grep operations
+  outputLines?: string[];
+  // Metadata when slicing
+  truncated?: boolean;
+  totalLines?: number;
+  returnedLines?: number;
+  lineStartIndex?: number;
+  lineEndIndex?: number; // exclusive
+  markerStartLost?: boolean; // true when start marker scrolled out but end marker found
+  sequenceNumber?: number; // ordering among wrapped commands for pairing markers
 }
 
-export type ShellType = 'bash' | 'zsh' | 'fish';
+export const supportedShellTypes = ['bash', 'zsh', 'fish', 'tclsh'] as const;
+export type ShellType = typeof supportedShellTypes[number];
 
-let shellConfig: { type: ShellType } = { type: 'bash' };
+type ShellConfigState = {
+  defaultType: ShellType;
+  paneOverrides: Map<string, ShellType>;
+};
 
-export function setShellConfig(config: { type: string }): void {
-  // Validate shell type
-  const validShells: ShellType[] = ['bash', 'zsh', 'fish'];
+const shellConfig: ShellConfigState = {
+  defaultType: 'bash',
+  paneOverrides: new Map()
+};
 
-  if (validShells.includes(config.type as ShellType)) {
-    shellConfig = { type: config.type as ShellType };
-  } else {
-    shellConfig = { type: 'bash' };
+function normalizeShellType(type: string): ShellType {
+  return (supportedShellTypes as readonly string[]).includes(type)
+    ? (type as ShellType)
+    : 'bash';
+}
+
+export function setShellConfig(config: { type: string; paneId?: string }): void {
+  const normalized = normalizeShellType(config.type);
+
+  if (config.paneId) {
+    shellConfig.paneOverrides.set(config.paneId, normalized);
+    // Reset cached initialization so the helper can be installed on demand
+    tclshInitializedPanes.delete(config.paneId);
+    return;
   }
+
+  shellConfig.defaultType = normalized;
+  if (normalized !== 'tclsh') {
+    tclshInitializedPanes.clear();
+  }
+}
+
+function resolveShellType(paneId: string): ShellType {
+  return shellConfig.paneOverrides.get(paneId) ?? shellConfig.defaultType;
+}
+
+function escapeForSingleQuotes(value: string): string {
+  return value.replace(/'/g, "'\\''");
 }
 
 /**
@@ -150,17 +234,111 @@ export async function listPanes(windowId: string): Promise<TmuxPane[]> {
 
 /**
  * Capture content from a specific pane, by default the latest 200 lines.
+ * Note: tmux's -S and -E flags are unreliable due to cursor position.
+ * We treat tmux start/end offsets as hints, rely on JavaScript slicing for
+ * relative (negative) offsets, and avoid re-applying positive offsets that
+ * tmux already honored to prevent double trimming.
  */
-export async function capturePaneContent(paneId: string, lines: number = 200, includeColors: boolean = false): Promise<string> {
-  const colorFlag = includeColors ? '-e' : '';
-  return executeTmux(`capture-pane -p ${colorFlag} -t '${paneId}' -S -${lines} -E -`);
+export async function capturePaneContent(paneId: string, options: CapturePaneOptions = {}): Promise<string> {
+  const {
+    lines = 200,
+    start,
+    end,
+    includeColors = false
+  } = options;
+
+  // Determine start value for tmux capture
+  // We'll use this to capture enough data, then slice accurately
+  let tmuxStart: string;
+  if (start !== undefined) {
+    tmuxStart = String(start);
+  } else if (lines === 0) {
+    // Capture all available lines
+    tmuxStart = '-'; // start from the beginning of history
+  } else {
+    // Default: capture the last N lines from history
+    tmuxStart = `-${lines}`;
+  }
+
+  const commandParts = ['capture-pane', '-p'];
+
+  if (includeColors) {
+    commandParts.push('-e');
+  }
+
+  commandParts.push(
+    '-t', `'${paneId}'`,
+    '-S', tmuxStart,
+    '-E', '-'  // Always use '-' for end because specific line numbers are unreliable
+  );
+
+  const capturedLines = await executeTmux(commandParts.join(' '));
+
+  // Now slice the output in JavaScript for accurate results
+  const linesArray = capturedLines.split('\n');
+  const startInfo = interpretCaptureIndex(start);
+  const endInfo = interpretCaptureIndex(end);
+
+  // Calculate actual slice indices
+  let sliceStart = 0;
+  let sliceEnd = linesArray.length;
+  const absoluteStartBase = startInfo.kind === 'absolute'
+    ? startInfo.value
+    : startInfo.kind === 'dash'
+      ? 0
+      : undefined;
+
+  if (startInfo.kind === 'relative') {
+    sliceStart = Math.max(0, linesArray.length + startInfo.value);
+  } else if (startInfo.kind === 'absolute' || startInfo.kind === 'dash') {
+    sliceStart = 0;
+  } else if (lines !== undefined && lines > 0) {
+    sliceStart = Math.max(0, linesArray.length - lines);
+  }
+
+  if (endInfo.kind === 'dash') {
+    sliceEnd = linesArray.length;
+  } else if (endInfo.kind === 'relative') {
+    sliceEnd = Math.max(0, linesArray.length + endInfo.value + 1);
+  } else if (endInfo.kind === 'absolute') {
+    if (absoluteStartBase !== undefined) {
+      const desiredLength = endInfo.value - absoluteStartBase + 1;
+      if (desiredLength <= 0) {
+        sliceEnd = sliceStart;
+      } else {
+        sliceEnd = Math.min(linesArray.length, sliceStart + desiredLength);
+      }
+    } else {
+      sliceEnd = Math.min(linesArray.length, endInfo.value + 1);
+    }
+  }
+
+  if (end === undefined && lines !== undefined && lines > 0) {
+    sliceEnd = Math.min(sliceEnd, sliceStart + lines);
+  }
+
+  if (sliceEnd < sliceStart) {
+    sliceEnd = sliceStart;
+  }
+
+  return linesArray.slice(sliceStart, sliceEnd).join('\n');
 }
 
 /**
  * Create a new tmux session
  */
-export async function createSession(name: string): Promise<TmuxSession | null> {
-  await executeTmux(`new-session -d -s "${name}"`);
+export async function createSession(name: string, options?: { minimal?: boolean; shellCommand?: string }): Promise<TmuxSession | null> {
+  // Allow launching with a minimal shell to skip startup scripts.
+  const safeName = escapeForSingleQuotes(name);
+  let launchCmd = `new-session -d -s '${safeName}'`;
+  if (options?.minimal) {
+    const shell = options.shellCommand || 'bash --noprofile --norc';
+    // Quote shell command separately so user shell isn't expanded prematurely.
+    launchCmd += ` '${shell.replace(/'/g, "'\\''")}'`;
+  } else if (options?.shellCommand) {
+    launchCmd += ` '${options.shellCommand.replace(/'/g, "'\\''")}'`;
+  }
+  await executeTmux(launchCmd);
   return findSessionByName(name);
 }
 
@@ -168,7 +346,8 @@ export async function createSession(name: string): Promise<TmuxSession | null> {
  * Create a new window in a session
  */
 export async function createWindow(sessionId: string, name: string): Promise<TmuxWindow | null> {
-  const output = await executeTmux(`new-window -t '${sessionId}' -n '${name}'`);
+  const safeName = escapeForSingleQuotes(name);
+  const output = await executeTmux(`new-window -t '${sessionId}' -n '${safeName}'`);
   const windows = await listWindows(sessionId);
   return windows.find(window => window.name === name) || null;
 }
@@ -236,30 +415,96 @@ export async function splitPane(
 // Map to track ongoing command executions
 const activeCommands = new Map<string, CommandExecution>();
 
-const startMarkerText = 'TMUX_MCP_START';
-const endMarkerPrefix = "TMUX_MCP_DONE_";
+const startMarkerBase = 'TMUX_MCP_START';
+const endMarkerBase = 'TMUX_MCP_DONE';
+const DEFAULT_RESULT_LINES = 100; // default number of lines returned when output is large
+type OutputSliceOptions = { lines?: number; start?: number; end?: number };
+
+function hasSliceOptions(options?: OutputSliceOptions): boolean {
+  return Boolean(options && (options.lines !== undefined || options.start !== undefined || options.end !== undefined));
+}
+
+function computeSliceBounds(totalLines: number, options?: OutputSliceOptions, defaultLimit?: number): { start: number; end: number } {
+  let sliceStart = 0;
+  let sliceEnd = totalLines;
+
+  if (options?.start !== undefined || options?.end !== undefined) {
+    if (options.start !== undefined) {
+      sliceStart = Math.max(0, options.start);
+    }
+    if (options.end !== undefined) {
+      sliceEnd = Math.min(totalLines, options.end + 1);
+    }
+  } else if (options?.lines !== undefined) {
+    sliceStart = Math.max(0, totalLines - options.lines);
+  } else if (defaultLimit !== undefined && totalLines > defaultLimit) {
+    sliceStart = Math.max(0, totalLines - defaultLimit);
+  }
+
+  if (sliceEnd < sliceStart) {
+    sliceEnd = sliceStart;
+  }
+
+  return { start: sliceStart, end: sliceEnd };
+}
+
+function applyOutputSlicing(command: CommandExecution, options?: OutputSliceOptions): void {
+  if (!command.outputLines) {
+    return;
+  }
+
+  const defaultLimit = hasSliceOptions(options) ? undefined : DEFAULT_RESULT_LINES;
+  const { start: sliceStart, end: sliceEnd } = computeSliceBounds(command.outputLines.length, options, defaultLimit);
+  const finalLines = command.outputLines.slice(sliceStart, sliceEnd);
+
+  command.result = finalLines.join('\n').trim();
+  command.returnedLines = finalLines.length;
+  command.lineStartIndex = sliceStart;
+  command.lineEndIndex = sliceEnd;
+  command.totalLines = command.outputLines.length;
+  command.truncated = command.outputLines.length > finalLines.length || Boolean(command.markerStartLost);
+}
+
+// Track tclsh initialization per pane to keep terminal output minimal
+const tclshInitializedPanes = new Set<string>();
+let wrappedCommandSequenceCounter = 0; // incremented for each non-raw wrapped command (sequence numbers)
 
 // Execute a command in a tmux pane and track its execution
 export async function executeCommand(paneId: string, command: string, rawMode?: boolean, noEnter?: boolean): Promise<string> {
   // Generate unique ID for this command execution
   const commandId = uuidv4();
 
+  const shellType = resolveShellType(paneId);
+
+  const sequenceNumber = (!rawMode && !noEnter) ? (wrappedCommandSequenceCounter + 1) : undefined;
+  debug('executeCommand: preparing', { paneId, command, rawMode, noEnter, shellType, sequenceNumber });
   let fullCommand: string;
   if (rawMode || noEnter) {
     fullCommand = command;
   } else {
-    const endMarkerText = getEndMarkerText();
-    fullCommand = `echo "${startMarkerText}"; ${command}; echo "${endMarkerText}"`;
+    if (shellType === 'tclsh') {
+      await ensureTclshInitialized(paneId);
+      fullCommand = buildTclshCommand(command, sequenceNumber!);
+    } else {
+      fullCommand = buildWrappedCommand(command, shellType, sequenceNumber!);
+    }
+  debug('executeCommand: wrapped command', fullCommand);
   }
 
   // Store command in tracking map
+  if (sequenceNumber) {
+    wrappedCommandSequenceCounter = sequenceNumber; // commit increment
+  }
+  debug('executeCommand: sending keys', { paneId, fullCommand, noEnter });
+
   activeCommands.set(commandId, {
     id: commandId,
     paneId,
     command,
     status: 'pending',
     startTime: new Date(),
-    rawMode: rawMode || noEnter
+    rawMode: rawMode || noEnter,
+    sequenceNumber
   });
 
   // Send the command to the tmux pane
@@ -287,50 +532,121 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
   return commandId;
 }
 
-export async function checkCommandStatus(commandId: string): Promise<CommandExecution | null> {
+export async function checkCommandStatus(commandId: string, options?: OutputSliceOptions): Promise<CommandExecution | null> {
   const command = activeCommands.get(commandId);
   if (!command) return null;
 
-  if (command.status !== 'pending') return command;
+  if (command.status !== 'pending') {
+    if (command.outputLines && (hasSliceOptions(options) || command.result === undefined)) {
+      applyOutputSlicing(command, options);
+      activeCommands.set(commandId, command);
+    }
+    return command;
+  }
 
-  const content = await capturePaneContent(command.paneId, 1000);
+  const content = await capturePaneContent(command.paneId, { lines: 0 }); // capture entire scrollback to avoid missing markers
+  debug('checkCommandStatus: captured content length', content.length, 'lines approx', content.split('\n').length);
 
   if (command.rawMode) {
     command.result = 'Status tracking unavailable for rawMode commands. Use capture-pane to monitor interactive apps instead.';
     return command;
   }
 
-  // Find the last occurrence of the markers
-  const startIndex = content.lastIndexOf(startMarkerText);
-  const endIndex = content.lastIndexOf(endMarkerPrefix);
+  // Build marker blocks keyed by sequence number.
+  const linesArr = content.split('\n');
+  interface Block { startLine?: number; endLine: number; exitCode: number; seq: number; }
+  const blocksBySeq = new Map<number, Block>();
+  let lastEndLine = -1;
+  for (let i = 0; i < linesArr.length; i++) {
+    const line = linesArr[i].trim();
+    // Start marker pattern: TMUX_MCP_START_<seq>
+    const startMatch = line.match(new RegExp(`^${startMarkerBase}_(\\d+)$`));
+    if (startMatch) {
+      const seq = parseInt(startMatch[1], 10);
+      const existing = blocksBySeq.get(seq) || { endLine: -1, exitCode: -1, seq };
+      existing.startLine = i;
+      blocksBySeq.set(seq, existing);
+    debug('checkCommandStatus: start marker found', { seq, lineIndex: i, line });
+      continue;
+    }
+    // End marker pattern: TMUX_MCP_DONE_<exit>_<seq>
+    const endMatch = line.match(new RegExp(`^${endMarkerBase}_(\\d+)_([0-9]+)$`));
+    if (endMatch) {
+      const exitCode = parseInt(endMatch[1], 10);
+      const seq = parseInt(endMatch[2], 10);
+      const existing = blocksBySeq.get(seq) || { startLine: undefined, endLine: i, exitCode, seq };
+      existing.endLine = i;
+      existing.exitCode = exitCode;
+      // If startLine missing (scrolled out), approximate start as previous end + 1
+      if (existing.startLine === undefined && lastEndLine >= 0) {
+        existing.startLine = lastEndLine + 1;
+      }
+      blocksBySeq.set(seq, existing);
+      lastEndLine = i;
+    debug('checkCommandStatus: end marker found', { seq, exitCode, lineIndex: i, line });
+    }
+  }
+  debug('checkCommandStatus: blocks summary', Array.from(blocksBySeq.values()));
 
-  if (startIndex === -1 || endIndex === -1 || endIndex <= startIndex) {
-    command.result = "Command output could not be captured properly";
+  // Determine this command's block by sequenceNumber ordering
+  const sequenceNumber = command.sequenceNumber;
+  if (sequenceNumber === undefined) {
+    // Raw mode: keep showing tail
+    const tail = linesArr.slice(-10).join('\n').trim();
+    command.result = tail ? tail : '(no recent output)';
     return command;
   }
 
-  // Extract exit code from the end marker line
-  const endLine = content.substring(endIndex).split('\n')[0];
-  const endMarkerRegex = new RegExp(`${endMarkerPrefix}(\\d+)`);
-  const exitCodeMatch = endLine.match(endMarkerRegex);
-
-  if (exitCodeMatch) {
-    const exitCode = parseInt(exitCodeMatch[1], 10);
-
-    command.status = exitCode === 0 ? 'completed' : 'error';
-    command.exitCode = exitCode;
-
-    // Extract output between the start and end markers
-    const outputStart = startIndex + startMarkerText.length;
-    const outputContent = content.substring(outputStart, endIndex).trim();
-
-    command.result = outputContent.substring(outputContent.indexOf('\n') + 1).trim();
-
-    // Update in map
-    activeCommands.set(commandId, command);
+  const block = sequenceNumber !== undefined ? blocksBySeq.get(sequenceNumber) : undefined;
+  if (!block) {
+    // Not completed yet; show tail snapshot
+    const tail = linesArr.slice(-10).join('\n').trim();
+    command.result = tail ? tail : '(no recent output)';
+  debug('checkCommandStatus: block not yet complete', { sequenceNumber, tailPreview: command.result });
+    return command;
   }
 
+  // If end marker not yet observed (endLine < 0), keep pending and show tail preview
+  if (block.endLine < 0) {
+    const tail = linesArr.slice(-10).join('\n').trim();
+    command.result = tail ? tail : '(no recent output)';
+    debug('checkCommandStatus: end marker missing, still pending', { sequenceNumber, tailPreview: command.result });
+    return command;
+  }
+
+  // Mark completion
+  command.status = block.exitCode === 0 ? 'completed' : 'error';
+  command.exitCode = block.exitCode;
+  command.markerStartLost = block.startLine === undefined;
+  debug('checkCommandStatus: block completed', { sequenceNumber, exitCode: command.exitCode, markerStartLost: command.markerStartLost, startLine: block.startLine, endLine: block.endLine });
+
+  // Extract lines between markers (exclusive of marker lines)
+  const sliceStartLine = (block.startLine !== undefined ? block.startLine + 1 : 0);
+  const sliceEndLine = block.endLine; // exclude end marker line
+  let outputLines = linesArr.slice(sliceStartLine, sliceEndLine);
+
+  // Remove echoed command if present at first line
+  if (outputLines.length && outputLines[0].trim() === command.command.trim()) {
+    outputLines.shift();
+  }
+  debug('checkCommandStatus: output lines after echo removal', { total: outputLines.length });
+
+  command.outputLines = outputLines.map(l => l);
+  applyOutputSlicing(command, options);
+  debug('checkCommandStatus: final slicing applied', { returned: command.returnedLines, total: command.totalLines, truncated: command.truncated, sliceStart: command.lineStartIndex, sliceEndExclusive: command.lineEndIndex });
+  activeCommands.set(commandId, command);
   return command;
+}
+
+// Poll until a command finishes or timeout expires
+export async function waitForCompletion(commandId: string, timeoutMs: number = 10000, intervalMs: number = 150): Promise<CommandExecution | null> {
+  const start = Date.now();
+  let status = await checkCommandStatus(commandId);
+  while (status && status.status === 'pending' && (Date.now() - start) < timeoutMs) {
+    await new Promise(r => setTimeout(r, intervalMs));
+    status = await checkCommandStatus(commandId);
+  }
+  return status;
 }
 
 // Get command by ID
@@ -344,7 +660,7 @@ export function getActiveCommandIds(): string[] {
 }
 
 // Clean up completed commands older than a certain time
-export function cleanupOldCommands(maxAgeMinutes: number = 60): void {
+export function cleanupOldCommands(maxAgeMinutes: number = 30): void {
   const now = new Date();
 
   for (const [id, command] of activeCommands.entries()) {
@@ -356,9 +672,92 @@ export function cleanupOldCommands(maxAgeMinutes: number = 60): void {
   }
 }
 
-function getEndMarkerText(): string {
-  return shellConfig.type === 'fish'
-    ? `${endMarkerPrefix}$status`
-    : `${endMarkerPrefix}$?`;
+function buildWrappedCommand(command: string, shellType: ShellType, seq: number): string {
+  // End marker uses shell-specific exit variable but includes sequence
+  // For fish, use braces to prevent variable name ambiguity (e.g., $status_1 would be interpreted as variable 'status_1')
+  const exitVar = shellType === 'fish' ? '$status' : '$?';
+  const fishExitWrapped = `{${exitVar}}`;
+  const wrapped = shellType === 'fish'
+    ? `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_"${fishExitWrapped}"_${seq}"`
+    : `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${seq}"`;
+  debug('buildWrappedCommand', { shellType, seq, wrapped });
+  return wrapped;
 }
 
+function buildTclshCommand(command: string, seq: number): string {
+  const wrapped = `::tmux_mcp::run ${seq} {${command}}`;
+  debug('buildTclshCommand', { seq, wrapped });
+  return wrapped;
+}
+
+
+async function ensureTclshInitialized(paneId: string): Promise<void> {
+  if (tclshInitializedPanes.has(paneId)) {
+    return;
+  }
+
+  const definitionCommand = [
+    'namespace eval ::tmux_mcp {',
+    'proc run {seq cmd} {',
+    'puts "' + startMarkerBase + '_${seq}"; flush stdout;',
+    'set status [catch {uplevel #0 $cmd} result opts];',
+    'if {$status == 0} {',
+    'if {[info exists result] && $result ne ""} { puts $result; flush stdout }',
+    '} else {',
+    'if {[info exists opts(-errorinfo)]} { puts $opts(-errorinfo); flush stdout } else { puts $result; flush stdout }',
+    '};',
+    'puts "' + endMarkerBase + '_${status}_${seq}"; flush stdout',
+    '}',
+    '}'
+  ].join(' ');
+  debug('ensureTclshInitialized: sending helper definition');
+
+  const escapedCommand = definitionCommand.replace(/'/g, "'\\''");
+  await executeTmux(`send-keys -t '${paneId}' '${escapedCommand}' Enter`);
+
+  tclshInitializedPanes.add(paneId);
+}
+
+// Retrieve sliced command output after completion without re-parsing markers
+export function getCommandOutput(commandId: string, options?: OutputSliceOptions): string | null {
+  const command = activeCommands.get(commandId);
+  if (!command || !command.outputLines) return null;
+  const { start, end } = computeSliceBounds(command.outputLines.length, options, undefined);
+  return command.outputLines.slice(start, end).join('\n');
+}
+
+// Grep command output lines with a regular expression; returns matching lines
+export function grepCommandOutput(commandId: string, pattern: string, flags?: string): string[] {
+  const command = activeCommands.get(commandId);
+  if (!command || !command.outputLines) return [];
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern, flags);
+  } catch {
+    return [];
+  }
+  return command.outputLines.filter(line => regex.test(line));
+}
+
+// Switch pane to a minimal shell variant (bash only for now) to skip heavy startup scripts.
+export async function switchPaneToMinimalShell(paneId: string): Promise<boolean> {
+  const shellType = resolveShellType(paneId);
+  if (shellType !== 'bash') {
+    return false; // Only implemented for bash currently
+  }
+  // Use exec to replace current shell, suppress profile and rc loading.
+  await executeTmux(`send-keys -t '${paneId}' 'exec bash --noprofile --norc' Enter`);
+  // Emit a readiness marker after replacement
+  await executeTmux(`send-keys -t '${paneId}' 'echo MINIMAL_READY' Enter`);
+  // Poll for readiness marker appearing in last captured lines
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const tail = await capturePaneContent(paneId, { lines: 50 });
+    if (tail.split('\n').some(l => l.includes('MINIMAL_READY'))) {
+      debug('switchPaneToMinimalShell: minimal shell ready');
+      return true;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  debug('switchPaneToMinimalShell: timeout waiting for readiness');
+  return false;
+}

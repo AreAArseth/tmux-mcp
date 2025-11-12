@@ -1,6 +1,6 @@
 {
-  "name": "tmux-mcp",
-  "version": "0.2.2",
+  "name": "@arearseth/tmux-mcp",
+  "version": "0.3.3",
   "description": "MCP Server for interfacing with tmux sessions",
   "type": "module",
   "main": "build/index.js",
@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node build/index.js",
     "dev": "tsc -w",
+    "test": "vitest run",
     "check-release": "npm run build && npm publish --dry-run",
     "release": "npm run build && npm publish"
   },
@@ -32,14 +33,15 @@
   "devDependencies": {
     "@types/node": "^20.10.5",
     "@types/uuid": "^10.0.0",
+    "vitest": "^1.6.0",
     "typescript": "^5.3.3"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nickgnd/tmux-mcp.git"
+    "url": "git+https://github.com/AreAArseth/tmux-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/nickgnd/tmux-mcp/issues"
+    "url": "https://github.com/AreAArseth/tmux-mcp/issues"
   },
-  "homepage": "https://github.com/nickgnd/tmux-mcp#readme"
+  "homepage": "https://github.com/AreAArseth/tmux-mcp#readme"
 }

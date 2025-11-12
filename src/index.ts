@@ -5,11 +5,12 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as tmux from "./tmux.js";
+import pkg from "../package.json" with { type: "json" };
 
 // Create MCP server
 const server = new McpServer({
   name: "tmux-mcp",
-  version: "0.2.2"
+  version: pkg.version
 }, {
   capabilities: {
     resources: {
@@ -22,6 +23,30 @@ const server = new McpServer({
     logging: {}
   }
 });
+
+const shellTypeSchema = z.enum(tmux.supportedShellTypes);
+
+/**
+ * Calculate the end index for display purposes when output is truncated.
+ * Returns the actual end index minus 1, or calculates it from start index and returned lines,
+ * or returns 'unknown' if not enough information is available.
+ */
+function calculateEndIndexDisplay(
+  lineEndIndex: number | undefined,
+  lineStartIndex: number | undefined,
+  returnedLines: number | undefined
+): number | string {
+  if (lineEndIndex !== undefined) {
+    return lineEndIndex - 1;
+  }
+  if (returnedLines !== undefined && lineStartIndex !== undefined) {
+    return lineStartIndex + returnedLines - 1;
+  }
+  if (returnedLines !== undefined) {
+    return returnedLines - 1;
+  }
+  return 'unknown';
+}
 
 // List all tmux sessions - Tool
 server.tool(
@@ -136,18 +161,36 @@ server.tool(
 // Capture pane content - Tool
 server.tool(
   "capture-pane",
-  "Capture content from a tmux pane with configurable lines count and optional color preservation",
+  "Capture content from a tmux pane. Defaults to the last N lines, but you can provide tmux-style start/end offsets (like 0 and -) to walk the full scrollback.",
   {
     paneId: z.string().describe("ID of the tmux pane"),
-    lines: z.string().optional().describe("Number of lines to capture"),
+    lines: z.string().optional().describe("Number of trailing lines to capture when start/end offsets are omitted (defaults to 200)"),
+    start: z.string().optional().describe("tmux -S offset; use 0 for the oldest line or a negative value to offset from the bottom"),
+    end: z.string().optional().describe("tmux -E offset; use - for the newest line or 0 for the active cursor line"),
     colors: z.boolean().optional().describe("Include color/escape sequences for text and background attributes in output")
   },
-  async ({ paneId, lines, colors }) => {
+  async ({ paneId, lines, start, end, colors }) => {
     try {
       // Parse lines parameter if provided
-      const linesCount = lines ? parseInt(lines, 10) : undefined;
-      const includeColors = colors || false;
-      const content = await tmux.capturePaneContent(paneId, linesCount, includeColors);
+      const parsedLines = lines !== undefined ? parseInt(lines, 10) : undefined;
+      const includeColors = colors ?? false;
+      const options: tmux.CapturePaneOptions = {
+        includeColors
+      };
+
+      if (parsedLines !== undefined && !Number.isNaN(parsedLines) && parsedLines > 0) {
+        options.lines = parsedLines;
+      }
+
+      if (start !== undefined && start !== '') {
+        options.start = start;
+      }
+
+      if (end !== undefined && end !== '') {
+        options.end = end;
+      }
+
+      const content = await tmux.capturePaneContent(paneId, options);
       return {
         content: [{
           type: "text",
@@ -169,13 +212,15 @@ server.tool(
 // Create new session - Tool
 server.tool(
   "create-session",
-  "Create a new tmux session",
+  "Create a new tmux session (optionally minimal to skip startup scripts)",
   {
-    name: z.string().describe("Name for the new tmux session")
+    name: z.string().describe("Name for the new tmux session"),
+  minimal: z.boolean().optional().describe("Launch with a minimal shell (bash --noprofile --norc) to skip startup scripts for speed. If shellCommand is provided, it overrides the minimal shell setting."),
+  shellCommand: z.string().optional().describe("Custom shell command in the new session. If minimal=true and shellCommand provided, it overrides the default minimal bash. Examples: 'bash --noprofile --norc', 'zsh -f'"),
   },
-  async ({ name }) => {
+  async ({ name, minimal, shellCommand }) => {
     try {
-      const session = await tmux.createSession(name);
+      const session = await tmux.createSession(name, { minimal: minimal === true, shellCommand });
       return {
         content: [{
           type: "text",
@@ -343,6 +388,36 @@ server.tool(
   }
 );
 
+// Configure shell type - Tool
+server.tool(
+  "set-shell-type",
+  "Configure the shell for command execution (bash, zsh, fish, tclsh). Provide paneId to override a specific pane.",
+  {
+    type: shellTypeSchema,
+    paneId: z.string().optional().describe("ID of the tmux pane to override. Omit to change the default shell type.")
+  },
+  async ({ type, paneId }) => {
+    try {
+      tmux.setShellConfig({ type, paneId });
+      const target = paneId ? `pane ${paneId}` : 'default';
+      return {
+        content: [{
+          type: "text",
+          text: `Shell type for ${target} set to ${type}`
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error setting shell type: ${error}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
 // Execute command in pane - Tool
 server.tool(
   "execute-command",
@@ -395,12 +470,15 @@ server.tool(
   "get-command-result",
   "Get the result of an executed command",
   {
-    commandId: z.string().describe("ID of the executed command")
+    commandId: z.string().describe("ID of the executed command"),
+    lines: z.number().int().positive().optional().describe("Return only the last N lines of output"),
+    start: z.number().int().min(0).optional().describe("Start line index (0-based) of slice to return"),
+    end: z.number().int().min(0).optional().describe("End line index (0-based, inclusive) of slice to return")
   },
-  async ({ commandId }) => {
+  async ({ commandId, lines, start, end }) => {
     try {
       // Check and update command status
-      const command = await tmux.checkCommandStatus(commandId);
+      const command = await tmux.checkCommandStatus(commandId, { lines, start, end });
 
       if (!command) {
         return {
@@ -421,7 +499,24 @@ server.tool(
           resultText = `Command still executing...\nStarted: ${command.startTime.toISOString()}\nCommand: ${command.command}`;
         }
       } else {
-        resultText = `Status: ${command.status}\nExit code: ${command.exitCode}\nCommand: ${command.command}\n\n--- Output ---\n${command.result}`;
+        const metaLines: string[] = [
+          `Status: ${command.status}`,
+          `Exit code: ${command.exitCode}`,
+          `Command: ${command.command}`
+        ];
+        if (command.truncated) {
+          const endIdxDisplay = calculateEndIndexDisplay(
+            command.lineEndIndex,
+            command.lineStartIndex,
+            command.returnedLines
+          );
+          metaLines.push(
+            `Output truncated: showing ${command.returnedLines} of ${command.totalLines} lines (slice ${command.lineStartIndex}..${endIdxDisplay})`
+          );
+        } else if (command.outputLines) {
+          metaLines.push(`Lines returned: ${command.returnedLines ?? command.outputLines.length}`);
+        }
+        resultText = metaLines.join("\n") + `\n\n--- Output ---\n${command.result}`;
       }
 
       return {
@@ -438,6 +533,105 @@ server.tool(
         }],
         isError: true
       };
+    }
+  }
+);
+
+// Wait for command completion - Tool
+server.tool(
+  "wait-command-completion",
+  "Poll until a command completes or timeout expires. Returns final or intermediate status with sliced output.",
+  {
+    commandId: z.string().describe("ID of the executed command"),
+    timeoutMs: z.number().int().positive().optional().describe("Maximum milliseconds to wait (default 10000)"),
+    intervalMs: z.number().int().positive().optional().describe("Polling interval milliseconds (default 150)"),
+    lines: z.number().int().positive().optional().describe("Return only the last N lines of output when completed"),
+    start: z.number().int().min(0).optional().describe("Start line index (0-based) slice"),
+    end: z.number().int().min(0).optional().describe("End line index (0-based, inclusive) slice")
+  },
+  async ({ commandId, timeoutMs, intervalMs, lines, start, end }) => {
+    try {
+      const status = await tmux.waitForCompletion(commandId, timeoutMs ?? 10000, intervalMs ?? 150);
+      if (!status) {
+        return { content: [{ type: 'text', text: `Command not found: ${commandId}` }], isError: true };
+      }
+      // If completed we may want a sliced result
+      if (status.status !== 'pending' && (lines !== undefined || start !== undefined || end !== undefined)) {
+        const refreshed = await tmux.checkCommandStatus(commandId, { lines, start, end });
+        if (refreshed) {
+          // Adopt sliced result and metadata for consistency with get-command-result
+          status.result = refreshed.result;
+          status.returnedLines = refreshed.returnedLines;
+          status.lineStartIndex = refreshed.lineStartIndex;
+          status.lineEndIndex = refreshed.lineEndIndex;
+          status.truncated = refreshed.truncated;
+          status.totalLines = refreshed.totalLines;
+          status.outputLines = refreshed.outputLines;
+        }
+      }
+      const meta: string[] = [
+        `Status: ${status.status}`,
+        `Exit code: ${status.exitCode ?? 'n/a'}`,
+        `Command: ${status.command}`
+      ];
+      if (status.truncated) {
+        const endIdxDisplay = calculateEndIndexDisplay(
+          status.lineEndIndex,
+          status.lineStartIndex,
+          status.returnedLines
+        );
+        meta.push(`Output truncated: showing ${status.returnedLines} of ${status.totalLines} lines (slice ${status.lineStartIndex}..${endIdxDisplay})`);
+      } else if (status.outputLines) {
+        meta.push(`Lines returned: ${status.returnedLines ?? status.outputLines.length}`);
+      }
+      return {
+        content: [{
+          type: 'text',
+          text: meta.join('\n') + `\n\n--- Output ---\n${status.result || ''}`
+        }]
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error waiting for command: ${error}` }], isError: true };
+    }
+  }
+);
+
+// Grep command output - Tool
+server.tool(
+  "grep-command-output",
+  "Search completed command output lines using a regular expression. Requires the command to have completed (non-pending). Returns matching lines.",
+  {
+    commandId: z.string().describe("ID of the executed command"),
+    pattern: z.string().describe("Regular expression pattern (ECMAScript syntax)"),
+    flags: z.string().optional().describe("Regex flags (e.g. i, m, g). 'g' is ignored for matching lines but allowed."),
+    limit: z.number().int().positive().optional().describe("Maximum number of matching lines to return (from first match onward)")
+  },
+  async ({ commandId, pattern, flags, limit }) => {
+    try {
+      const command = tmux.getCommand(commandId);
+      if (!command) {
+        return { content: [{ type: 'text', text: `Command not found: ${commandId}` }], isError: true };
+      }
+      if (command.status === 'pending') {
+        return { content: [{ type: 'text', text: `Command still pending: ${commandId}` }], isError: true };
+      }
+      const lines = tmux.grepCommandOutput(commandId, pattern, flags);
+      const limited = limit ? lines.slice(0, limit) : lines;
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            commandId,
+            pattern,
+            flags: flags || '',
+            totalMatches: lines.length,
+            returned: limited.length,
+            matches: limited
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error during grep: ${error}` }], isError: true };
     }
   }
 );
@@ -518,7 +712,10 @@ server.resource(
       // Ensure paneId is a string
       const paneIdStr = Array.isArray(paneId) ? paneId[0] : paneId;
       // Default to no colors for resources to maintain clean programmatic access
-      const content = await tmux.capturePaneContent(paneIdStr, 200, false);
+      const content = await tmux.capturePaneContent(paneIdStr, {
+        lines: 200,
+        includeColors: false
+      });
       return {
         contents: [{
           uri: uri.href,
