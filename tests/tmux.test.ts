@@ -148,6 +148,63 @@ describe("tmux utilities", () => {
     expect(commands[0]).toContain("-S -"); // Should capture from beginning
   });
 
+  it("always uses -E - regardless of end parameter value, handles end in JavaScript", async () => {
+    // -E has the same unreliability as -S: it depends on "current position" and may
+    // capture "old" lines or miss the intended end point. We always use -E - and
+    // handle end slicing entirely in JavaScript.
+    execMock.mockImplementationOnce(async () => {
+      const lines: string[] = [];
+      for (let i = 0; i < 25; i++) {
+        lines.push(`full-buffer-line-${i}`);
+      }
+      return { stdout: lines.join("\n"), stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    // Request end: 15 - should get lines 0-15 (16 lines total)
+    const content = await tmux.capturePaneContent("%1", { start: 0, end: 15 });
+
+    const resultLines = content.split("\n");
+    expect(resultLines).toHaveLength(16); // Lines 0-15 inclusive
+    expect(resultLines[0]).toBe("full-buffer-line-0");
+    expect(resultLines[15]).toBe("full-buffer-line-15");
+    
+    // Verify we always use -E - regardless of end parameter
+    const commands = execMock.mock.calls.map(args => args[0]);
+    expect(commands[0]).toContain("-E -"); // Should always use -E -
+    expect(commands[0]).not.toContain("-E 15"); // Should not use the end value
+  });
+
+  it("handles negative end values correctly with JavaScript slicing", async () => {
+    // Negative end values are relative to the end of the captured buffer
+    // end: -5 means "exclude the last 5 lines", so with 30 lines total:
+    // - Last 5 lines are indices 25-29
+    // - We want to end at index 25 (exclusive), so last included is index 24
+    // - With start: 5, we get indices 5-25 (exclusive), which is 21 elements (lines 5-25)
+    execMock.mockImplementationOnce(async () => {
+      const lines: string[] = [];
+      for (let i = 0; i < 30; i++) {
+        lines.push(`buffer-line-${i}`);
+      }
+      return { stdout: lines.join("\n"), stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    // Request start: 5, end: -5 (exclude last 5 lines) - should get lines 5-25 (21 lines)
+    const content = await tmux.capturePaneContent("%1", { start: 5, end: -5 });
+
+    const resultLines = content.split("\n");
+    // Current implementation: end: -5 with 30 lines gives sliceEnd = 30 + (-5) + 1 = 26
+    // slice(5, 26) gives indices 5-25, which is 21 elements
+    expect(resultLines).toHaveLength(21);
+    expect(resultLines[0]).toBe("buffer-line-5");
+    expect(resultLines[20]).toBe("buffer-line-25"); // Last included line (before the last 5)
+    
+    // Verify we always use -E -
+    const commands = execMock.mock.calls.map(args => args[0]);
+    expect(commands[0]).toContain("-E -");
+  });
+
   it("splits panes with direction and size options", async () => {
     execMock
       .mockImplementationOnce(async () => {

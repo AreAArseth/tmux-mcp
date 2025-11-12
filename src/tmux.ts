@@ -207,17 +207,20 @@ export async function listPanes(windowId: string): Promise<TmuxPane[]> {
 /**
  * Capture content from a specific pane, by default the latest 200 lines.
  * 
- * IMPORTANT: tmux's -S (start) parameter is unreliable and depends on "current position"
- * which changes based on what tmux is showing or doing. This makes it unsuitable for
- * precise line-based slicing. For example:
+ * IMPORTANT: tmux's -S (start) and -E (end) parameters are unreliable and depend on
+ * "current position" which changes based on what tmux is showing or doing. This makes
+ * them unsuitable for precise line-based slicing. For example:
  * - `-S -5` may capture more than 5 lines (e.g., 7-8 lines) due to current position
  * - `-S 10` may capture from line 8, 10, 12, or anywhere depending on cursor/viewport state
+ * - `-E -1` may capture "old" lines or miss the intended end point due to the same issue
  * 
  * Strategy:
  * - When explicit `start` is provided: Always capture from beginning (`-S -`) and rely
  *   entirely on JavaScript slicing for accuracy. This avoids double-application of offsets.
  * - When only `lines` is provided (without explicit start): Use `-S -N` as an optimization
  *   hint to reduce data transfer, but still apply JavaScript slicing to ensure correctness.
+ * - Always use `-E -` (end at current position) regardless of `end` parameter value, and
+ *   handle end slicing entirely in JavaScript for accuracy.
  * - JavaScript slicing is always authoritative for the final result.
  */
 export async function capturePaneContent(paneId: string, options: CapturePaneOptions = {}): Promise<string> {
@@ -254,15 +257,18 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   commandParts.push(
     '-t', `'${paneId}'`,
     '-S', tmuxStart,
-    '-E', '-'  // Always use '-' for end because specific line numbers are unreliable
+    '-E', '-'  // Always use '-' for end because -E has the same unreliability as -S:
+               // it depends on "current position" and may capture "old" lines or miss
+               // the intended end point. JavaScript slicing handles end accurately.
   );
 
   const capturedLines = await executeTmux(commandParts.join(' '));
 
   // Slice the output in JavaScript for accurate results.
-  // This is necessary because tmux's -S parameter is unreliable and may return
-  // more lines than requested or start from an unexpected position.
-  // JavaScript slicing is always authoritative for the final result.
+  // This is necessary because tmux's -S and -E parameters are unreliable and may return
+  // more lines than requested, start from an unexpected position, or end at the wrong place
+  // due to "current position" dependencies. JavaScript slicing is always authoritative
+  // for the final result.
   const linesArray = capturedLines.split('\n');
 
   // Calculate actual slice indices based on the captured buffer
@@ -318,6 +324,8 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   }
 
   if (end !== undefined) {
+    // Explicit end provided: calculate slice end from the full buffer
+    // (we always use -E - in tmux, so this is an absolute index in the captured buffer)
     const endValue = typeof end === 'number'
       ? end
       : end === '-'
@@ -327,8 +335,10 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
     if (Number.isNaN(endValue)) {
       sliceEnd = linesArray.length;
     } else if (endValue < 0) {
+      // Handle negative indices (relative to end)
       sliceEnd = Math.max(0, linesArray.length + endValue + 1);
     } else {
+      // Handle positive indices (absolute, +1 because end is inclusive)
       sliceEnd = Math.min(linesArray.length, endValue + 1);
     }
   }
