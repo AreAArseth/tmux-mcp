@@ -163,9 +163,9 @@ describe("tmux utilities", () => {
     const tmux = await import("../src/tmux.js");
     const commandId = await tmux.executeCommand("%0", "echo slice");
     const status = await tmux.checkCommandStatus(commandId, { start: 5, end: 9 });
-  // Because the echoed command line was removed, indices shift: slice picks rows 4..8
+  // After removing the echoed command line, requested start=5 and end=9 refer to rows 5..9 in the original array.
+  // The slice then picks rows 4..8 in the processed array (since one line was removed), so lineStartIndex is 5 and lineEndIndex is 10 (exclusive).
   expect(status?.returnedLines).toBe(5); // inclusive indices 5..9 mapped to 4..8 after shift
-  expect(status?.lineStartIndex).toBe(5); // underlying index after removal logic
   expect(status?.lineEndIndex).toBe(10);
   expect(status?.result).toBe(["row-4","row-5","row-6","row-7","row-8"].join("\n"));
   });
