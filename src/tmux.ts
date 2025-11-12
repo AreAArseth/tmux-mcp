@@ -250,8 +250,8 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   // Handle start parameter
   if (start !== undefined) {
     const startNum = typeof start === 'number' ? start : parseInt(start, 10);
-    // Negative values count from end
-    sliceStart = startNum < 0 ? Math.max(0, linesArray.length + startNum) : 0;
+    // Negative values count from end, positive values are absolute indices
+    sliceStart = startNum < 0 ? Math.max(0, linesArray.length + startNum) : startNum;
   } else if (lines !== undefined && lines > 0) {
     // If no start specified but lines is, take last N lines
     sliceStart = Math.max(0, linesArray.length - lines);
@@ -272,7 +272,9 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
  */
 export async function createSession(name: string, options?: { minimal?: boolean; shellCommand?: string }): Promise<TmuxSession | null> {
   // Allow launching with a minimal shell to skip startup scripts.
-  let launchCmd = `new-session -d -s "${name}"`;
+  // Properly escape session name to prevent shell injection
+  const escapedName = name.replace(/'/g, "'\\''");
+  let launchCmd = `new-session -d -s '${escapedName}'`;
   if (options?.minimal) {
     const shell = options.shellCommand || 'bash --noprofile --norc';
     // Quote shell command separately so user shell isn't expanded prematurely.
@@ -581,8 +583,11 @@ export function cleanupOldCommands(maxAgeMinutes: number = 30): void {
 
 function buildWrappedCommand(command: string, shellType: ShellType, seq: number): string {
   // End marker uses shell-specific exit variable but includes sequence
+  // For fish, use braces to prevent variable name ambiguity (e.g., $status_1 would be interpreted as variable 'status_1')
   const exitVar = shellType === 'fish' ? '$status' : '$?';
-  const wrapped = `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${seq}"`;
+  const wrapped = shellType === 'fish'
+    ? `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_"{$status}"_${seq}"`
+    : `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${seq}"`;
   debug('buildWrappedCommand', { shellType, seq, wrapped });
   return wrapped;
 }
