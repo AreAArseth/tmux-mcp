@@ -166,7 +166,6 @@ describeIfTmux("tmux integration", () => {
     if (!primaryPaneId) return;
 
     tmux.setShellConfig({ type: "bash", paneId: primaryPaneId });
-  // Avoid spawning a login shell; run directly in existing pane shell
   const commandId = await tmux.executeCommand(primaryPaneId, "echo 'stderr-only' 1>&2");
     const status = await waitForCommandCompletion(commandId);
 

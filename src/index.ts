@@ -562,11 +562,11 @@ server.tool(
           // Adopt sliced result and metadata for consistency with get-command-result
           status.result = refreshed.result;
           status.returnedLines = refreshed.returnedLines;
-            status.lineStartIndex = refreshed.lineStartIndex;
-            status.lineEndIndex = refreshed.lineEndIndex;
-            status.truncated = refreshed.truncated;
-            status.totalLines = refreshed.totalLines;
-            status.outputLines = refreshed.outputLines;
+          status.lineStartIndex = refreshed.lineStartIndex;
+          status.lineEndIndex = refreshed.lineEndIndex;
+          status.truncated = refreshed.truncated;
+          status.totalLines = refreshed.totalLines;
+          status.outputLines = refreshed.outputLines;
         }
       }
       const meta: string[] = [
