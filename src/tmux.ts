@@ -431,6 +431,52 @@ const activeCommands = new Map<string, CommandExecution>();
 const startMarkerBase = 'TMUX_MCP_START';
 const endMarkerBase = 'TMUX_MCP_DONE';
 const DEFAULT_RESULT_LINES = 100; // default number of lines returned when output is large
+type OutputSliceOptions = { lines?: number; start?: number; end?: number };
+
+function hasSliceOptions(options?: OutputSliceOptions): boolean {
+  return Boolean(options && (options.lines !== undefined || options.start !== undefined || options.end !== undefined));
+}
+
+function computeSliceBounds(totalLines: number, options?: OutputSliceOptions, defaultLimit?: number): { start: number; end: number } {
+  let sliceStart = 0;
+  let sliceEnd = totalLines;
+
+  if (options?.start !== undefined || options?.end !== undefined) {
+    if (options.start !== undefined) {
+      sliceStart = Math.max(0, options.start);
+    }
+    if (options.end !== undefined) {
+      sliceEnd = Math.min(totalLines, options.end + 1);
+    }
+  } else if (options?.lines !== undefined) {
+    sliceStart = Math.max(0, totalLines - options.lines);
+  } else if (defaultLimit !== undefined && totalLines > defaultLimit) {
+    sliceStart = Math.max(0, totalLines - defaultLimit);
+  }
+
+  if (sliceEnd < sliceStart) {
+    sliceEnd = sliceStart;
+  }
+
+  return { start: sliceStart, end: sliceEnd };
+}
+
+function applyOutputSlicing(command: CommandExecution, options?: OutputSliceOptions): void {
+  if (!command.outputLines) {
+    return;
+  }
+
+  const defaultLimit = hasSliceOptions(options) ? undefined : DEFAULT_RESULT_LINES;
+  const { start: sliceStart, end: sliceEnd } = computeSliceBounds(command.outputLines.length, options, defaultLimit);
+  const finalLines = command.outputLines.slice(sliceStart, sliceEnd);
+
+  command.result = finalLines.join('\n').trim();
+  command.returnedLines = finalLines.length;
+  command.lineStartIndex = sliceStart;
+  command.lineEndIndex = sliceEnd;
+  command.totalLines = command.outputLines.length;
+  command.truncated = command.outputLines.length > finalLines.length || Boolean(command.markerStartLost);
+}
 
 // Track tclsh initialization per pane to keep terminal output minimal
 const tclshInitializedPanes = new Set<string>();
@@ -499,11 +545,17 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
   return commandId;
 }
 
-export async function checkCommandStatus(commandId: string, options?: { lines?: number; start?: number; end?: number }): Promise<CommandExecution | null> {
+export async function checkCommandStatus(commandId: string, options?: OutputSliceOptions): Promise<CommandExecution | null> {
   const command = activeCommands.get(commandId);
   if (!command) return null;
 
-  if (command.status !== 'pending') return command;
+  if (command.status !== 'pending') {
+    if (command.outputLines && (hasSliceOptions(options) || command.result === undefined)) {
+      applyOutputSlicing(command, options);
+      activeCommands.set(commandId, command);
+    }
+    return command;
+  }
 
   const content = await capturePaneContent(command.paneId, { lines: 0 }); // capture entire scrollback to avoid missing markers
   debug('checkCommandStatus: captured content length', content.length, 'lines approx', content.split('\n').length);
@@ -593,25 +645,7 @@ export async function checkCommandStatus(commandId: string, options?: { lines?: 
   debug('checkCommandStatus: output lines after echo removal', { total: outputLines.length });
 
   command.outputLines = outputLines.map(l => l);
-  command.totalLines = outputLines.length;
-
-  const { lines, start, end } = options || {};
-  let sliceIdxStart = 0;
-  let sliceIdxEnd = outputLines.length;
-  if (start !== undefined || end !== undefined) {
-    if (start !== undefined) sliceIdxStart = Math.max(0, start);
-    if (end !== undefined) sliceIdxEnd = Math.min(outputLines.length, end + 1);
-  } else if (lines !== undefined) {
-    sliceIdxStart = Math.max(0, outputLines.length - lines);
-  } else if (outputLines.length > DEFAULT_RESULT_LINES) {
-    sliceIdxStart = Math.max(0, outputLines.length - DEFAULT_RESULT_LINES);
-  }
-  const finalLines = outputLines.slice(sliceIdxStart, sliceIdxEnd);
-  command.result = finalLines.join('\n').trim();
-  command.returnedLines = finalLines.length;
-  command.lineStartIndex = sliceIdxStart;
-  command.lineEndIndex = sliceIdxEnd;
-  command.truncated = outputLines.length > finalLines.length || command.markerStartLost;
+  applyOutputSlicing(command, options);
   debug('checkCommandStatus: final slicing applied', { returned: command.returnedLines, total: command.totalLines, truncated: command.truncated, sliceStart: command.lineStartIndex, sliceEndExclusive: command.lineEndIndex });
   activeCommands.set(commandId, command);
   return command;
@@ -697,25 +731,11 @@ async function ensureTclshInitialized(paneId: string): Promise<void> {
 }
 
 // Retrieve sliced command output after completion without re-parsing markers
-export function getCommandOutput(commandId: string, options?: { lines?: number; start?: number; end?: number }): string | null {
+export function getCommandOutput(commandId: string, options?: OutputSliceOptions): string | null {
   const command = activeCommands.get(commandId);
   if (!command || !command.outputLines) return null;
-  const { lines, start, end } = options || {};
-  let sliceStart = 0;
-  let sliceEnd = command.outputLines.length; // exclusive
-
-  if (start !== undefined || end !== undefined) {
-    if (start !== undefined) {
-      sliceStart = Math.max(0, start);
-    }
-    if (end !== undefined) {
-      sliceEnd = Math.min(command.outputLines.length, end + 1); // inclusive external end
-    }
-  } else if (lines !== undefined) {
-    sliceStart = Math.max(0, command.outputLines.length - lines);
-  }
-
-  return command.outputLines.slice(sliceStart, sliceEnd).join('\n');
+  const { start, end } = computeSliceBounds(command.outputLines.length, options, undefined);
+  return command.outputLines.slice(start, end).join('\n');
 }
 
 // Grep command output lines with a regular expression; returns matching lines
