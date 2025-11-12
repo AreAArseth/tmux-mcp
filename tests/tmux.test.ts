@@ -115,7 +115,7 @@ describe("tmux utilities", () => {
     const status = await tmux.checkCommandStatus(commandId);
   const commands = execMock.mock.calls.map(args => args[0]);
 
-  // Sequence numbers start at 1 now
+  // Sequence numbers start at 1 because the counter is incremented before assignment in the implementation.
   expect(commands[0]).toMatch(/tmux send-keys -t '%0' 'echo "TMUX_MCP_START_1"; ls; echo "TMUX_MCP_DONE_\$\?_1"' Enter/);
   expect(commands[1]).toBe("tmux capture-pane -p -t '%0' -S - -E -");
     expect(status).not.toBeNull();
