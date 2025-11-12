@@ -26,6 +26,28 @@ const server = new McpServer({
 
 const shellTypeSchema = z.enum(tmux.supportedShellTypes);
 
+/**
+ * Calculate the end index for display purposes when output is truncated.
+ * Returns the actual end index minus 1, or calculates it from start index and returned lines,
+ * or returns 'unknown' if not enough information is available.
+ */
+function calculateEndIndexDisplay(
+  lineEndIndex: number | undefined,
+  lineStartIndex: number | undefined,
+  returnedLines: number | undefined
+): number | string {
+  if (lineEndIndex !== undefined) {
+    return lineEndIndex - 1;
+  }
+  if (returnedLines !== undefined && lineStartIndex !== undefined) {
+    return lineStartIndex + returnedLines - 1;
+  }
+  if (returnedLines !== undefined) {
+    return returnedLines - 1;
+  }
+  return 'unknown';
+}
+
 // List all tmux sessions - Tool
 server.tool(
   "list-sessions",
@@ -483,7 +505,11 @@ server.tool(
           `Command: ${command.command}`
         ];
         if (command.truncated) {
-          const endIdxDisplay = command.lineEndIndex !== undefined ? command.lineEndIndex - 1 : (command.returnedLines ? (command.lineStartIndex ?? 0) + (command.returnedLines - 1) : 'unknown');
+          const endIdxDisplay = calculateEndIndexDisplay(
+            command.lineEndIndex,
+            command.lineStartIndex,
+            command.returnedLines
+          );
           metaLines.push(
             `Output truncated: showing ${command.returnedLines} of ${command.totalLines} lines (slice ${command.lineStartIndex}..${endIdxDisplay})`
           );
@@ -549,7 +575,11 @@ server.tool(
         `Command: ${status.command}`
       ];
       if (status.truncated) {
-        const endIdxDisplay = status.lineEndIndex !== undefined ? status.lineEndIndex - 1 : 'unknown';
+        const endIdxDisplay = calculateEndIndexDisplay(
+          status.lineEndIndex,
+          status.lineStartIndex,
+          status.returnedLines
+        );
         meta.push(`Output truncated: showing ${status.returnedLines} of ${status.totalLines} lines (slice ${status.lineStartIndex}..${endIdxDisplay})`);
       } else if (status.outputLines) {
         meta.push(`Lines returned: ${status.returnedLines ?? status.outputLines.length}`);
