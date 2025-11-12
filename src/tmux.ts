@@ -690,7 +690,7 @@ function buildWrappedCommand(command: string, shellType: ShellType, seq: number)
   // For fish, use braces to prevent variable name ambiguity (e.g., $status_1 would be interpreted as variable 'status_1')
   const exitVar = shellType === 'fish' ? '$status' : '$?';
   const wrapped = shellType === 'fish'
-    ? `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_"{$status}"_${seq}"`
+    ? `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_"{$exitVar}"_${seq}"`
     : `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${seq}"`;
   debug('buildWrappedCommand', { shellType, seq, wrapped });
   return wrapped;
