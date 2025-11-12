@@ -379,4 +379,132 @@ describe("tmux utilities", () => {
   expect(commands[0]).toMatch(/echo "TMUX_MCP_START_1"; echo test; echo "TMUX_MCP_DONE_\$\?_1"/);
     expect(tmux.getActiveCommandIds()).not.toContain(commandId);
   });
+
+  // BUG FIX TEST 1: Positive start values in capturePaneContent
+  it("respects positive start values when capturing pane content (Bug Fix #1)", async () => {
+    execMock.mockImplementationOnce(async () => {
+      const lines: string[] = [];
+      for (let i = 0; i < 50; i++) {
+        lines.push(`line-${i}`);
+      }
+      return { stdout: lines.join("\n"), stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    // Capture starting from line 10
+    const content = await tmux.capturePaneContent("%0", { start: 10, end: 14 });
+    
+    const capturedLines = content.split("\n");
+    expect(capturedLines).toHaveLength(5); // lines 10-14 inclusive
+    expect(capturedLines[0]).toBe("line-10");
+    expect(capturedLines[4]).toBe("line-14");
+  });
+
+  // BUG FIX TEST 2: Shell injection prevention in createSession
+  it("escapes session names to prevent shell injection (Bug Fix #2)", async () => {
+    execMock.mockImplementationOnce(async (command: string) => {
+      // Verify the command has properly escaped single quotes
+      return { stdout: "", stderr: "" };
+    })
+    .mockImplementationOnce(async () => {
+      return { 
+        stdout: "$1:safe'test:0:1",
+        stderr: ""
+      };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    // Try to inject a malicious command using single quote
+    const maliciousName = "safe'test";
+    await tmux.createSession(maliciousName);
+
+    const commands = execMock.mock.calls.map(args => args[0]);
+    // Verify the name is properly escaped with single quotes
+    expect(commands[0]).toContain("new-session -d -s 'safe'\\''test'");
+    // Ensure double quotes are NOT used (which would be vulnerable)
+    expect(commands[0]).not.toMatch(/new-session -d -s ".*"/);
+  });
+
+  it("prevents command injection via session name with dangerous characters (Bug Fix #2)", async () => {
+    execMock.mockImplementationOnce(async () => ({ stdout: "", stderr: "" }))
+              .mockImplementationOnce(async () => ({ 
+                stdout: "$1:test:0:1",
+                stderr: ""
+              }));
+
+    const tmux = await import("../src/tmux.js");
+    // Try various injection attempts
+    const dangerousName = "test$(whoami)";
+    await tmux.createSession(dangerousName);
+
+    const commands = execMock.mock.calls.map(args => args[0]);
+    // With single quotes, $() should not be expanded
+    expect(commands[0]).toContain("new-session -d -s 'test$(whoami)'");
+    // Verify it's using single quotes which prevent command substitution
+    expect(commands[0]).toMatch(/new-session -d -s '[^"]*'/);
+  });
+
+  // BUG FIX TEST 3: Fish shell variable interpolation
+  it("properly interpolates fish shell exit status variable (Bug Fix #3)", async () => {
+    execMock.mockImplementation(async (command: string) => {
+      if (command.includes("capture-pane")) {
+        return {
+          stdout: [
+            "TMUX_MCP_START_1",
+            "echo fish-test",
+            "echo fish-test",
+            "fish-test",
+            "TMUX_MCP_DONE_0_1"
+          ].join("\n"),
+          stderr: ""
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    tmux.setShellConfig({ type: "fish", paneId: "%0" });
+    
+    const commandId = await tmux.executeCommand("%0", "echo fish-test");
+    
+    const commands = execMock.mock.calls.map(args => args[0]);
+    const sendKeysCmd = commands.find(c => c.includes("send-keys") && c.includes("fish-test"));
+    
+    // Verify fish shell uses braces around $status to prevent ambiguity
+    // The pattern should be: TMUX_MCP_DONE_{$status}_1
+    // NOT: TMUX_MCP_DONE_$status_1 (which fish would interpret as variable $status_1)
+    expect(sendKeysCmd).toContain('TMUX_MCP_DONE_"{$status}"_1');
+    
+    const status = await tmux.checkCommandStatus(commandId);
+    expect(status?.status).toBe("completed");
+    expect(status?.exitCode).toBe(0);
+    expect(status?.result).toContain("fish-test");
+    
+    // Reset to bash
+    tmux.setShellConfig({ type: "bash", paneId: "%0" });
+  });
+
+  it("bash and zsh use $? without braces (Bug Fix #3 - regression check)", async () => {
+    execMock.mockImplementation(async () => ({ stdout: "", stderr: "" }));
+
+    const tmux = await import("../src/tmux.js");
+    
+    // Test bash
+    tmux.setShellConfig({ type: "bash", paneId: "%1" });
+    await tmux.executeCommand("%1", "echo bash-test");
+    
+    let commands = execMock.mock.calls.map(args => args[0]);
+    let bashCmd = commands[commands.length - 1];
+    expect(bashCmd).toContain('TMUX_MCP_DONE_$?_');
+    expect(bashCmd).not.toContain('{$?}');
+    
+    // Test zsh
+    tmux.setShellConfig({ type: "zsh", paneId: "%2" });
+    await tmux.executeCommand("%2", "echo zsh-test");
+    
+    commands = execMock.mock.calls.map(args => args[0]);
+    let zshCmd = commands[commands.length - 1];
+    expect(zshCmd).toContain('TMUX_MCP_DONE_$?_');
+    expect(zshCmd).not.toContain('{$?}');
+  });
 });

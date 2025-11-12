@@ -299,13 +299,35 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   };
 
   if (start !== undefined) {
-    sliceStart = resolveStartIndex(start);
+    const startValue = typeof start === 'number'
+      ? start
+      : start === '-'
+        ? 0
+        : Number(start);
+
+    if (!Number.isNaN(startValue)) {
+      sliceStart = startValue < 0
+        ? Math.max(0, linesArray.length + startValue)
+        : Math.min(linesArray.length, startValue);
+    }
   } else if (lines !== undefined && lines > 0) {
     sliceStart = Math.max(0, linesArray.length - lines);
   }
 
   if (end !== undefined) {
-    sliceEnd = resolveEndIndex(end);
+    const endValue = typeof end === 'number'
+      ? end
+      : end === '-'
+        ? linesArray.length - 1
+        : Number(end);
+
+    if (Number.isNaN(endValue)) {
+      sliceEnd = linesArray.length;
+    } else if (endValue < 0) {
+      sliceEnd = Math.max(0, linesArray.length + endValue + 1);
+    } else {
+      sliceEnd = Math.min(linesArray.length, endValue + 1);
+    }
   }
 
   if (sliceEnd < sliceStart) {
@@ -631,8 +653,11 @@ export function cleanupOldCommands(maxAgeMinutes: number = 30): void {
 
 function buildWrappedCommand(command: string, shellType: ShellType, seq: number): string {
   // End marker uses shell-specific exit variable but includes sequence
+  // For fish, use braces to prevent variable name ambiguity (e.g., $status_1 would be interpreted as variable 'status_1')
   const exitVar = shellType === 'fish' ? '$status' : '$?';
-  const wrapped = `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${seq}"`;
+  const wrapped = shellType === 'fish'
+    ? `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_"{$status}"_${seq}"`
+    : `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${seq}"`;
   debug('buildWrappedCommand', { shellType, seq, wrapped });
   return wrapped;
 }
