@@ -251,28 +251,6 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   let sliceStart = 0;
   let sliceEnd = linesArray.length;
 
-  const resolveStartIndex = (value: string | number | undefined): number => {
-    if (value === undefined) {
-      return Math.max(0, linesArray.length - (lines ?? 0));
-    }
-
-    const normalized = typeof value === 'number'
-      ? value
-      : value === '-'
-        ? 0
-        : Number(value);
-
-    if (Number.isNaN(normalized)) {
-      return 0;
-    }
-
-    if (normalized < 0) {
-      return Math.max(0, linesArray.length + normalized);
-    }
-
-    return Math.min(linesArray.length, normalized);
-  };
-
   const resolveEndIndex = (value: string | number | undefined): number => {
     if (value === undefined) {
       if (lines !== undefined && lines > 0 && start === undefined) {
