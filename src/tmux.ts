@@ -206,8 +206,19 @@ export async function listPanes(windowId: string): Promise<TmuxPane[]> {
 
 /**
  * Capture content from a specific pane, by default the latest 200 lines.
- * Note: tmux's -S and -E flags are unreliable due to cursor position,
- * so we capture a range and slice in JavaScript.
+ * 
+ * IMPORTANT: tmux's -S (start) parameter is unreliable and depends on "current position"
+ * which changes based on what tmux is showing or doing. This makes it unsuitable for
+ * precise line-based slicing. For example:
+ * - `-S -5` may capture more than 5 lines (e.g., 7-8 lines) due to current position
+ * - `-S 10` may capture from line 8, 10, 12, or anywhere depending on cursor/viewport state
+ * 
+ * Strategy:
+ * - When explicit `start` is provided: Always capture from beginning (`-S -`) and rely
+ *   entirely on JavaScript slicing for accuracy. This avoids double-application of offsets.
+ * - When only `lines` is provided (without explicit start): Use `-S -N` as an optimization
+ *   hint to reduce data transfer, but still apply JavaScript slicing to ensure correctness.
+ * - JavaScript slicing is always authoritative for the final result.
  */
 export async function capturePaneContent(paneId: string, options: CapturePaneOptions = {}): Promise<string> {
   const {
@@ -218,15 +229,19 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   } = options;
 
   // Determine start value for tmux capture
-  // We'll use this to capture enough data, then slice accurately
+  // When explicit start is provided, always capture from beginning to avoid
+  // double-application of offset (tmux's unreliable -S + JavaScript slicing)
   let tmuxStart: string;
   if (start !== undefined) {
-    tmuxStart = String(start);
+    // Explicit start: capture from beginning, JavaScript slicing will handle the offset
+    // This avoids the bug where tmux's unreliable -S offset gets applied twice
+    tmuxStart = '-'; // start from the beginning of history
   } else if (lines === 0) {
     // Capture all available lines
     tmuxStart = '-'; // start from the beginning of history
   } else {
-    // Default: capture the last N lines from history
+    // Default: capture the last N lines from history (optimization hint)
+    // JavaScript slicing will ensure we get exactly N lines even if tmux returns more
     tmuxStart = `-${lines}`;
   }
 
@@ -244,10 +259,15 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
 
   const capturedLines = await executeTmux(commandParts.join(' '));
 
-  // Now slice the output in JavaScript for accurate results
+  // Slice the output in JavaScript for accurate results.
+  // This is necessary because tmux's -S parameter is unreliable and may return
+  // more lines than requested or start from an unexpected position.
+  // JavaScript slicing is always authoritative for the final result.
   const linesArray = capturedLines.split('\n');
 
-  // Calculate actual slice indices
+  // Calculate actual slice indices based on the captured buffer
+  // Note: When start was explicitly provided, we captured from the beginning,
+  // so these indices are absolute positions in the full buffer.
   let sliceStart = 0;
   let sliceEnd = linesArray.length;
 
@@ -277,6 +297,8 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   };
 
   if (start !== undefined) {
+    // Explicit start provided: calculate slice start from the full buffer
+    // (we captured from beginning, so this is an absolute index)
     const startValue = typeof start === 'number'
       ? start
       : start === '-'
@@ -284,11 +306,14 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
         : Number(start);
 
     if (!Number.isNaN(startValue)) {
+      // Handle negative indices (relative to end) and positive indices (absolute)
       sliceStart = startValue < 0
         ? Math.max(0, linesArray.length + startValue)
         : Math.min(linesArray.length, startValue);
     }
   } else if (lines !== undefined && lines > 0) {
+    // No explicit start: get the last N lines
+    // tmux's -S -N may have returned more than N lines, so we slice to get exactly N
     sliceStart = Math.max(0, linesArray.length - lines);
   }
 

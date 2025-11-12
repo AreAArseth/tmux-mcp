@@ -54,7 +54,9 @@ describe("tmux utilities", () => {
     const tmux = await import("../src/tmux.js");
     await tmux.capturePaneContent("%1", { start: "0", end: "-", includeColors: true });
 
-    expect(execMock).toHaveBeenCalledWith("tmux capture-pane -p -e -t '%1' -S 0 -E -");
+    // When start is explicitly provided, we always capture from beginning (-S -)
+    // to avoid double-application of offset. JavaScript slicing handles the start offset.
+    expect(execMock).toHaveBeenCalledWith("tmux capture-pane -p -e -t '%1' -S - -E -");
   });
 
   it("slices captured pane output correctly for numeric start and '-' end", async () => {
@@ -67,6 +69,83 @@ describe("tmux utilities", () => {
     const content = await tmux.capturePaneContent("%1", { start: 2, end: "-" });
 
     expect(content).toBe(["line-1", "line-2", "line-3"].join("\n"));
+  });
+
+  it("handles unreliable tmux -S parameter: when start is provided, tmux may return more lines than requested", async () => {
+    // Simulate tmux's unreliable behavior: -S -5 might return 7 lines instead of 5
+    // because it depends on "current position" which can change
+    execMock.mockImplementationOnce(async () => {
+      // tmux was asked for -S -5 but returns 7 lines (more than requested)
+      const lines: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        lines.push(`buffer-line-${i}`);
+      }
+      return { stdout: lines.join("\n"), stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    // Request last 5 lines, but tmux returns 7 due to unreliable -S
+    const content = await tmux.capturePaneContent("%1", { lines: 5 });
+
+    // JavaScript slicing should give us exactly the last 5 lines
+    const resultLines = content.split("\n");
+    expect(resultLines).toHaveLength(5);
+    expect(resultLines[0]).toBe("buffer-line-2"); // Last 5 of 7 lines
+    expect(resultLines[4]).toBe("buffer-line-6");
+  });
+
+  it("handles unreliable tmux -S with explicit start: always captures from beginning, JavaScript slicing is authoritative", async () => {
+    // When start is provided, we always capture from the beginning (-S -) to avoid
+    // double-application of offset. JavaScript slicing handles the start offset accurately.
+    execMock.mockImplementationOnce(async () => {
+      // After fix: we always capture from beginning when start is explicit
+      // So tmux returns the full buffer (lines 0-19)
+      const lines: string[] = [];
+      for (let i = 0; i < 20; i++) {
+        lines.push(`absolute-line-${i}`);
+      }
+      return { stdout: lines.join("\n"), stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    // Request start: 10 - should get lines 10-19
+    const content = await tmux.capturePaneContent("%1", { start: 10 });
+
+    // After fix: JavaScript slices from index 10 of the full buffer
+    const resultLines = content.split("\n");
+    expect(resultLines).toHaveLength(10); // Lines 10-19
+    expect(resultLines[0]).toBe("absolute-line-10");
+    expect(resultLines[9]).toBe("absolute-line-19");
+    
+    // Verify we called tmux with -S - (beginning) not -S 10
+    const commands = execMock.mock.calls.map(args => args[0]);
+    expect(commands[0]).toContain("capture-pane");
+    expect(commands[0]).toContain("-S -"); // Should capture from beginning
+    expect(commands[0]).not.toContain("-S 10"); // Should not use the start value
+  });
+
+  it("handles negative start values correctly when explicit start is provided", async () => {
+    // Negative start values are relative to the end of the buffer
+    execMock.mockImplementationOnce(async () => {
+      const lines: string[] = [];
+      for (let i = 0; i < 30; i++) {
+        lines.push(`buffer-line-${i}`);
+      }
+      return { stdout: lines.join("\n"), stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    // Request start: -10 (last 10 lines) - should get lines 20-29
+    const content = await tmux.capturePaneContent("%1", { start: -10 });
+
+    const resultLines = content.split("\n");
+    expect(resultLines).toHaveLength(10); // Last 10 lines
+    expect(resultLines[0]).toBe("buffer-line-20"); // Line 20 (30 - 10)
+    expect(resultLines[9]).toBe("buffer-line-29"); // Line 29
+    
+    // Verify we captured from beginning
+    const commands = execMock.mock.calls.map(args => args[0]);
+    expect(commands[0]).toContain("-S -"); // Should capture from beginning
   });
 
   it("splits panes with direction and size options", async () => {
