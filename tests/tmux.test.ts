@@ -57,6 +57,18 @@ describe("tmux utilities", () => {
     expect(execMock).toHaveBeenCalledWith("tmux capture-pane -p -e -t '%1' -S 0 -E -");
   });
 
+  it("slices captured pane output correctly for numeric start and '-' end", async () => {
+    execMock.mockImplementationOnce(async () => ({
+      stdout: ["prompt>", "line-0", "line-1", "line-2", "line-3"].join("\n"),
+      stderr: ""
+    }));
+
+    const tmux = await import("../src/tmux.js");
+    const content = await tmux.capturePaneContent("%1", { start: 2, end: "-" });
+
+    expect(content).toBe(["line-1", "line-2", "line-3"].join("\n"));
+  });
+
   it("splits panes with direction and size options", async () => {
     execMock
       .mockImplementationOnce(async () => {
@@ -203,6 +215,37 @@ describe("tmux utilities", () => {
   // Ensure we captured more than just tail snapshot (large output scenario)
   expect((status?.result || '').split('\n').length).toBeGreaterThan(10);
   });
+
+    it("escapes session names to prevent command injection when creating sessions", async () => {
+      execMock
+        .mockImplementationOnce(async () => ({ stdout: "", stderr: "" }))
+        .mockImplementationOnce(async () => ({
+          stdout: "$1:unsafe'Name:0:1",
+          stderr: ""
+        }));
+
+      const tmux = await import("../src/tmux.js");
+      await tmux.createSession("unsafe'Name");
+
+      const firstCommand = execMock.mock.calls[0][0];
+      expect(firstCommand).toBe("tmux new-session -d -s 'unsafe'\\''Name'");
+    });
+
+    it("escapes window names when creating windows", async () => {
+      execMock
+        .mockImplementationOnce(async () => ({ stdout: "", stderr: "" }))
+        .mockImplementationOnce(async () => ({
+          stdout: "@1:unsafe'Window:1",
+          stderr: ""
+        }));
+
+      const tmux = await import("../src/tmux.js");
+      const window = await tmux.createWindow("$1", "unsafe'Window");
+
+      const firstCommand = execMock.mock.calls[0][0];
+      expect(firstCommand).toBe("tmux new-window -t '$1' -n 'unsafe'\\''Window'");
+      expect(window?.name).toBe("unsafe'Window");
+    });
 
   it("wraps tclsh commands and preserves Tcl output", async () => {
   execMock.mockImplementation(async (command: string) => {

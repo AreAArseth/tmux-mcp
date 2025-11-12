@@ -104,6 +104,10 @@ function resolveShellType(paneId: string): ShellType {
   return shellConfig.paneOverrides.get(paneId) ?? shellConfig.defaultType;
 }
 
+function escapeForSingleQuotes(value: string): string {
+  return value.replace(/'/g, "'\\''");
+}
+
 /**
  * Execute a tmux command and return the result
  */
@@ -247,21 +251,65 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
   let sliceStart = 0;
   let sliceEnd = linesArray.length;
 
-  // Handle start parameter
+  const resolveStartIndex = (value: string | number | undefined): number => {
+    if (value === undefined) {
+      return Math.max(0, linesArray.length - (lines ?? 0));
+    }
+
+    const normalized = typeof value === 'number'
+      ? value
+      : value === '-'
+        ? 0
+        : Number(value);
+
+    if (Number.isNaN(normalized)) {
+      return 0;
+    }
+
+    if (normalized < 0) {
+      return Math.max(0, linesArray.length + normalized);
+    }
+
+    return Math.min(linesArray.length, normalized);
+  };
+
+  const resolveEndIndex = (value: string | number | undefined): number => {
+    if (value === undefined) {
+      if (lines !== undefined && lines > 0 && start === undefined) {
+        return linesArray.length;
+      }
+      return sliceEnd;
+    }
+
+    const normalized = typeof value === 'number'
+      ? value
+      : value === '-'
+        ? linesArray.length - 1
+        : Number(value);
+
+    if (Number.isNaN(normalized)) {
+      return linesArray.length;
+    }
+
+    if (normalized < 0) {
+      return Math.max(0, linesArray.length + normalized + 1);
+    }
+
+    return Math.min(linesArray.length, normalized + 1);
+  };
+
   if (start !== undefined) {
-    const startNum = typeof start === 'number' ? start : parseInt(start, 10);
-    // Negative values count from end
-    sliceStart = startNum < 0 ? Math.max(0, linesArray.length + startNum) : 0;
+    sliceStart = resolveStartIndex(start);
   } else if (lines !== undefined && lines > 0) {
-    // If no start specified but lines is, take last N lines
     sliceStart = Math.max(0, linesArray.length - lines);
   }
 
-  // Handle end parameter
   if (end !== undefined) {
-    const endNum = typeof end === 'number' ? end : parseInt(end, 10);
-    // Negative values count from end
-    sliceEnd = endNum < 0 ? linesArray.length + endNum + 1 : endNum + 1;
+    sliceEnd = resolveEndIndex(end);
+  }
+
+  if (sliceEnd < sliceStart) {
+    sliceEnd = sliceStart;
   }
 
   return linesArray.slice(sliceStart, sliceEnd).join('\n');
@@ -272,7 +320,8 @@ export async function capturePaneContent(paneId: string, options: CapturePaneOpt
  */
 export async function createSession(name: string, options?: { minimal?: boolean; shellCommand?: string }): Promise<TmuxSession | null> {
   // Allow launching with a minimal shell to skip startup scripts.
-  let launchCmd = `new-session -d -s "${name}"`;
+  const safeName = escapeForSingleQuotes(name);
+  let launchCmd = `new-session -d -s '${safeName}'`;
   if (options?.minimal) {
     const shell = options.shellCommand || 'bash --noprofile --norc';
     // Quote shell command separately so user shell isn't expanded prematurely.
@@ -288,7 +337,8 @@ export async function createSession(name: string, options?: { minimal?: boolean;
  * Create a new window in a session
  */
 export async function createWindow(sessionId: string, name: string): Promise<TmuxWindow | null> {
-  const output = await executeTmux(`new-window -t '${sessionId}' -n '${name}'`);
+  const safeName = escapeForSingleQuotes(name);
+  const output = await executeTmux(`new-window -t '${sessionId}' -n '${safeName}'`);
   const windows = await listWindows(sessionId);
   return windows.find(window => window.name === name) || null;
 }
