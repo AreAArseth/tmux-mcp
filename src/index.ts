@@ -5,11 +5,12 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as tmux from "./tmux.js";
+import pkg from "../package.json" with { type: "json" };
 
 // Create MCP server
 const server = new McpServer({
   name: "tmux-mcp",
-  version: "0.3.3" // Keep in sync with package.json
+  version: pkg.version
 }, {
   capabilities: {
     resources: {
