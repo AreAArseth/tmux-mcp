@@ -192,7 +192,7 @@ server.tool(
   "Create a new tmux session (optionally minimal to skip startup scripts)",
   {
     name: z.string().describe("Name for the new tmux session"),
-  minimal: z.boolean().optional().describe("Launch with a minimal shell (bash --noprofile --norc) to skip startup scripts for speed."),
+  minimal: z.boolean().optional().describe("Launch with a minimal shell (bash --noprofile --norc) to skip startup scripts for speed. If shellCommand is provided, it overrides the minimal shell setting."),
   shellCommand: z.string().optional().describe("Custom shell command in the new session. If minimal=true and shellCommand provided, it overrides the default minimal bash. Examples: 'bash --noprofile --norc', 'zsh -f'"),
   },
   async ({ name, minimal, shellCommand }) => {
