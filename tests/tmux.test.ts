@@ -206,7 +206,7 @@ describe("tmux utilities", () => {
     const tmux = await import("../src/tmux.js");
     const commandId = await tmux.executeCommand("%9", "ls");
   const status = await tmux.checkCommandStatus(commandId);
-  // Desired future behavior: command should still complete and parse exit code even if start marker missing
+  // Expected behavior: command should still complete and parse exit code even if start marker missing
   expect(status?.status).toBe("completed");
   expect(status?.exitCode).toBe(0);
   // Expect output to include all lines except the echoed command and end marker
