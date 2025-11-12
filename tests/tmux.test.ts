@@ -336,4 +336,105 @@ describe("tmux utilities", () => {
   expect(commands[0]).toMatch(/echo "TMUX_MCP_START_1"; echo test; echo "TMUX_MCP_DONE_\$\?_1"/);
     expect(tmux.getActiveCommandIds()).not.toContain(commandId);
   });
+
+  it("prevents race condition in sequence counter with concurrent commands", async () => {
+    execMock.mockImplementation(async () => ({ stdout: "", stderr: "" }));
+
+    const tmux = await import("../src/tmux.js");
+    
+    // Execute multiple commands concurrently to test race condition
+    const commandPromises = [
+      tmux.executeCommand("%0", "command1"),
+      tmux.executeCommand("%1", "command2"),
+      tmux.executeCommand("%2", "command3"),
+    ];
+    
+    const commandIds = await Promise.all(commandPromises);
+    
+    // Get all commands and check their sequence numbers are unique
+    const commands = commandIds.map(id => tmux.getCommand(id)).filter(cmd => cmd !== null);
+    const sequenceNumbers = commands
+      .map(cmd => cmd?.sequenceNumber)
+      .filter((seq): seq is number => seq !== undefined);
+    
+    // All sequence numbers should be unique
+    expect(new Set(sequenceNumbers).size).toBe(sequenceNumbers.length);
+    // Sequence numbers should be sequential (1, 2, 3)
+    expect(sequenceNumbers.sort()).toEqual([1, 2, 3]);
+  });
+
+  it("handles NaN when parsing windows count from invalid tmux output", async () => {
+    execMock.mockImplementationOnce(async (command: string) => {
+      return {
+        stdout: "$1:main:1:invalid_number\n$2:backup:0:5",
+        stderr: ""
+      };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    const sessions = await tmux.listSessions();
+    
+    expect(sessions).toEqual([
+      { id: "$1", name: "main", attached: true, windows: 0 }, // Should default to 0, not NaN
+      { id: "$2", name: "backup", attached: false, windows: 5 }
+    ]);
+  });
+
+  it("handles NaN when parsing start/end offsets in capturePaneContent", async () => {
+    execMock.mockImplementationOnce(async () => {
+      return { stdout: "line1\nline2\nline3", stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    // Test with invalid string that would parse to NaN
+    const content = await tmux.capturePaneContent("%1", { start: "invalid", end: "also_invalid" });
+    
+    // Should handle gracefully without crashing - defaults to full content
+    expect(content).toBe("line1\nline2\nline3");
+  });
+
+  it("parses session names containing colons correctly", async () => {
+    execMock.mockImplementationOnce(async (command: string) => {
+      return {
+        stdout: "$1:session:with:colons:1:2\n$2:normal:0:5",
+        stderr: ""
+      };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    const sessions = await tmux.listSessions();
+    
+    expect(sessions).toEqual([
+      { id: "$1", name: "session:with:colons", attached: true, windows: 2 },
+      { id: "$2", name: "normal", attached: false, windows: 5 }
+    ]);
+  });
+
+  it("parses window names containing colons correctly", async () => {
+    execMock.mockImplementationOnce(async () => {
+      return { stdout: "@1:window:name:with:colons:1\n@2:normal:0", stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    const windows = await tmux.listWindows("$1");
+    
+    expect(windows).toEqual([
+      { id: "@1", name: "window:name:with:colons", active: true, sessionId: "$1" },
+      { id: "@2", name: "normal", active: false, sessionId: "$1" }
+    ]);
+  });
+
+  it("parses pane titles containing colons correctly", async () => {
+    execMock.mockImplementationOnce(async () => {
+      return { stdout: "%1:pane:title:with:colons:1\n%2:normal:0", stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    const panes = await tmux.listPanes("@1");
+    
+    expect(panes).toEqual([
+      { id: "%1", windowId: "@1", title: "pane:title:with:colons", active: true },
+      { id: "%2", windowId: "@1", title: "normal", active: false }
+    ]);
+  });
 });
