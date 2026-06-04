@@ -421,11 +421,11 @@ server.tool(
 // Execute command in pane - Tool
 server.tool(
   "execute-command",
-  "Execute a command in a tmux pane and get results. For interactive applications (REPLs, editors), use `rawMode=true`. IMPORTANT: When `rawMode=false` (default), avoid heredoc syntax (cat << EOF) and other multi-line constructs as they conflict with command wrapping. For file writing, prefer: printf 'content\\n' > file, echo statements, or write to temp files instead",
+  "Execute a command in a tmux pane and get results. Tcl REPLs (fc_shell, dc_shell, pt_shell, icc2_shell, tclsh) do NOT need rawMode: tracked mode auto-probes for Tcl, injects the tracking namespace, and pairs with wait-command-completion for immediate completion. Use rawMode=true only for true interactive edge cases (vim, less, btop); it disables status tracking and forces manual capture-pane polling. IMPORTANT: When rawMode=false (default), avoid heredoc syntax (cat << EOF) and other multi-line constructs as they conflict with command wrapping. For file writing, prefer: printf 'content\\n' > file, echo statements, or write to temp files instead",
   {
     paneId: z.string().describe("ID of the tmux pane"),
     command: z.string().describe("Command to execute"),
-    rawMode: z.boolean().optional().describe("Execute command without wrapper markers for REPL/interactive compatibility. Disables get-command-result status tracking. Use capture-pane after execution to verify command outcome."),
+    rawMode: z.boolean().optional().describe("Skip wrapper markers and status tracking. Do not use for Tcl REPLs (fc_shell/tclsh): tracked mode auto-detects Tcl and wait-command-completion returns as soon as the command finishes. Use only for non-Tcl interactive apps (vim, less) where wrapping breaks input; then verify with capture-pane."),
     noEnter: z.boolean().optional().describe("Send keystrokes without pressing Enter. For TUI navigation in apps like btop, vim, less. Supports special keys (Up, Down, Escape, Tab, etc.) and strings (sent char-by-char for proper filtering). Automatically applies rawMode. Use capture-pane after to see results.")
   },
   async ({ paneId, command, rawMode, noEnter }) => {
@@ -540,7 +540,7 @@ server.tool(
 // Wait for command completion - Tool
 server.tool(
   "wait-command-completion",
-  "Poll until a command completes or timeout expires. Returns final or intermediate status with sliced output.",
+  "Wait until a tracked command completes or timeout expires. Returns as soon as completion markers are detected (not a fixed sleep); polls at intervalMs only while still pending. Pair with execute-command (rawMode=false) for Tcl and shell commands.",
   {
     commandId: z.string().describe("ID of the executed command"),
     timeoutMs: z.number().int().positive().optional().describe("Maximum milliseconds to wait (default 10000)"),

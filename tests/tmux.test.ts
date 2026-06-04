@@ -21,6 +21,12 @@ vi.mock("child_process", () => {
   return { exec };
 });
 
+/** Mock Tcl probe (send-keys + one inconclusive capture) before tracked bash-default execute. */
+function mockTclProbeInconclusive(mock: typeof execMock) {
+  mock.mockImplementationOnce(async () => ({ stdout: '', stderr: '' }));
+  mock.mockImplementationOnce(async () => ({ stdout: '', stderr: '' }));
+}
+
 describe("tmux utilities", () => {
   afterEach(() => {
     vi.resetModules();
@@ -99,6 +105,7 @@ describe("tmux utilities", () => {
   });
 
   it("updates command status using pane capture markers", async () => {
+    mockTclProbeInconclusive(execMock);
     execMock
       .mockImplementationOnce(async () => {
         return { stdout: "", stderr: "" };
@@ -116,8 +123,9 @@ describe("tmux utilities", () => {
   const commands = execMock.mock.calls.map(args => args[0]);
 
   // Sequence numbers start at 1 because the counter is incremented before assignment in the implementation.
-  expect(commands[0]).toMatch(/tmux send-keys -t '%0' 'echo "TMUX_MCP_START_1"; ls; echo "TMUX_MCP_DONE_\$\?_1"' Enter/);
-  expect(commands[1]).toBe("tmux capture-pane -p -t '%0' -S - -E -");
+  expect(commands.some((cmd) => cmd.includes('puts TMUX_MCP_PROBE_'))).toBe(true);
+  expect(commands.some((cmd) => cmd.match(/echo "TMUX_MCP_START_1"; ls; echo "TMUX_MCP_DONE_\$\?_1"/))).toBe(true);
+  expect(commands.some((cmd) => cmd === "tmux capture-pane -p -t '%0' -S - -E -")).toBe(true);
     expect(status).not.toBeNull();
     expect(status?.status).toBe("completed");
     expect(status?.exitCode).toBe(0);
@@ -125,7 +133,7 @@ describe("tmux utilities", () => {
   });
 
   it("returns only last DEFAULT_RESULT_LINES when output is large and no options provided", async () => {
-    // First call: send keys
+    mockTclProbeInconclusive(execMock);
     execMock
       .mockImplementationOnce(async () => ({ stdout: "", stderr: "" }))
       // Second call: capture-pane returns large output
@@ -150,6 +158,7 @@ describe("tmux utilities", () => {
   });
 
   it("supports explicit line slicing via start/end options", async () => {
+    mockTclProbeInconclusive(execMock);
     execMock
       .mockImplementationOnce(async () => ({ stdout: "", stderr: "" }))
       .mockImplementationOnce(async () => {
@@ -171,6 +180,7 @@ describe("tmux utilities", () => {
   });
 
   it("supports grep of stored output lines", async () => {
+    mockTclProbeInconclusive(execMock);
     execMock
       .mockImplementationOnce(async () => ({ stdout: "", stderr: "" }))
       .mockImplementationOnce(async () => {
@@ -186,7 +196,7 @@ describe("tmux utilities", () => {
   });
 
   it("treats command as completed when end marker present even if start marker lost (expected new behavior)", async () => {
-    // First call sends command
+    mockTclProbeInconclusive(execMock);
     execMock
       .mockImplementationOnce(async () => ({ stdout: "", stderr: "" }))
       // Second call simulates capture-pane with end marker but missing start marker (scrolled out)
@@ -339,6 +349,7 @@ describe("tmux utilities", () => {
     tmux.setShellConfig({ type: "tclsh", paneId: "%0" });
 
     await tmux.executeCommand("%0", "expr 1+2");
+    mockTclProbeInconclusive(execMock);
     await tmux.executeCommand("%1", "ls");
 
   const commands = execMock.mock.calls.map(args => args[0]);
@@ -358,6 +369,7 @@ describe("tmux utilities", () => {
   });
 
   it("cleans up completed commands older than the max age", async () => {
+    mockTclProbeInconclusive(execMock);
     execMock.mockImplementationOnce(async () => {
       return { stdout: "", stderr: "" };
     });
@@ -376,7 +388,7 @@ describe("tmux utilities", () => {
     tmux.cleanupOldCommands(60);
 
   const commands = execMock.mock.calls.map(args => args[0]);
-  expect(commands[0]).toMatch(/echo "TMUX_MCP_START_1"; echo test; echo "TMUX_MCP_DONE_\$\?_1"/);
+  expect(commands.some((cmd) => cmd.match(/echo "TMUX_MCP_START_1"; echo test; echo "TMUX_MCP_DONE_\$\?_1"/))).toBe(true);
     expect(tmux.getActiveCommandIds()).not.toContain(commandId);
   });
 
@@ -494,6 +506,77 @@ describe("tmux utilities", () => {
     
     // Reset to bash
     tmux.setShellConfig({ type: "bash", paneId: "%0" });
+  });
+
+  it("auto-detects Tcl REPL via probe and uses tclsh wrapper without set-shell-type", async () => {
+    let probeMarker: string | undefined;
+    let awaitingProbeCapture = false;
+    execMock.mockImplementation(async (command: string) => {
+      if (command.includes("send-keys") && command.includes("TMUX_MCP_PROBE_")) {
+        const match = command.match(/puts (TMUX_MCP_PROBE_\d+)_/);
+        if (match) {
+          probeMarker = match[1];
+          awaitingProbeCapture = true;
+        }
+        return { stdout: "", stderr: "" };
+      }
+      if (command.includes("capture-pane")) {
+        if (awaitingProbeCapture && probeMarker) {
+          awaitingProbeCapture = false;
+          return { stdout: `${probeMarker}_8.6`, stderr: "" };
+        }
+        return {
+          stdout: [
+            "::tmux_mcp::run 1 {expr 2+2}",
+            "TMUX_MCP_START_1",
+            "4",
+            "TMUX_MCP_DONE_0_1"
+          ].join("\n"),
+          stderr: ""
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    const commandId = await tmux.executeCommand("%0", "expr 2+2");
+
+    const commands = execMock.mock.calls.map(args => args[0]);
+    expect(commands.some((cmd) => cmd.includes("puts TMUX_MCP_PROBE_"))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes("namespace eval ::tmux_mcp {"))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes("::tmux_mcp::run 1 {expr 2+2}"))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes('echo "TMUX_MCP_START_1"; expr 2+2'))).toBe(false);
+
+    const status = await tmux.checkCommandStatus(commandId);
+    expect(status?.status).toBe("completed");
+    expect(status?.result).toBe("4");
+  });
+
+  it("falls back to bash wrapper when Tcl probe is inconclusive", async () => {
+    mockTclProbeInconclusive(execMock);
+    execMock.mockImplementationOnce(async () => ({ stdout: "", stderr: "" }));
+
+    const tmux = await import("../src/tmux.js");
+    await tmux.executeCommand("%0", "pwd");
+
+    const commands = execMock.mock.calls.map(args => args[0]);
+    expect(commands.some((cmd) => cmd.includes("puts TMUX_MCP_PROBE_"))).toBe(true);
+    const bashCmd = commands.find((cmd) => cmd.includes("pwd") && cmd.includes("TMUX_MCP_DONE_$?"));
+    expect(bashCmd).toBeDefined();
+    expect(commands.some((cmd) => cmd.includes("::tmux_mcp::run"))).toBe(false);
+  });
+
+  it("skips Tcl probe when pane shell type is explicitly overridden", async () => {
+    execMock.mockImplementation(async () => ({ stdout: "", stderr: "" }));
+
+    const tmux = await import("../src/tmux.js");
+    tmux.setShellConfig({ type: "bash", paneId: "%0" });
+    await tmux.executeCommand("%0", "echo forced-bash");
+
+    const commands = execMock.mock.calls.map(args => args[0]);
+    expect(commands.some((cmd) => cmd.includes("puts TMUX_MCP_PROBE_"))).toBe(false);
+    expect(commands.some((cmd) => cmd.includes("echo forced-bash") && cmd.includes("TMUX_MCP_DONE_$?"))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes("::tmux_mcp::run"))).toBe(false);
   });
 
   it("bash and zsh use $? without braces (Bug Fix #3 - regression check)", async () => {

@@ -119,10 +119,12 @@ export function setShellConfig(config: { type: string; paneId?: string }): void 
     shellConfig.paneOverrides.set(config.paneId, normalized);
     // Reset cached initialization so the helper can be installed on demand
     tclshInitializedPanes.delete(config.paneId);
+    paneDetectedShell.delete(config.paneId);
     return;
   }
 
   shellConfig.defaultType = normalized;
+  paneDetectedShell.clear();
   if (normalized !== 'tclsh') {
     tclshInitializedPanes.clear();
   }
@@ -467,14 +469,72 @@ function applyOutputSlicing(command: CommandExecution, options?: OutputSliceOpti
 
 // Track tclsh initialization per pane to keep terminal output minimal
 const tclshInitializedPanes = new Set<string>();
+const paneDetectedShell = new Map<string, ShellType>();
 let wrappedCommandSequenceCounter = 0; // incremented for each non-raw wrapped command (sequence numbers)
+
+const PROBE_POLL_INTERVAL_MS = process.env.VITEST ? 0 : 100;
+const PROBE_MAX_ATTEMPTS = process.env.VITEST ? 1 : 15;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Probe whether the pane is in a Tcl REPL by sending a harmless Tcl command.
+ * pane_current_command is unreliable (often qrsh/make); this uses interpreter behavior.
+ */
+async function detectPaneShellType(paneId: string): Promise<ShellType | null> {
+  const marker = `TMUX_MCP_PROBE_${Date.now()}`;
+  const probeCommand = `puts ${marker}_[info tclversion]`;
+  const escapedProbe = probeCommand.replace(/'/g, "'\\''");
+  await executeTmux(`send-keys -t '${paneId}' '${escapedProbe}' Enter`);
+
+  const markerPattern = new RegExp(`^${escapeRegExp(marker)}_\\d`);
+  for (let attempt = 0; attempt < PROBE_MAX_ATTEMPTS; attempt++) {
+    if (PROBE_POLL_INTERVAL_MS > 0) {
+      await new Promise(r => setTimeout(r, PROBE_POLL_INTERVAL_MS));
+    }
+    const content = await capturePaneContent(paneId, { lines: 50 });
+    for (const line of content.split('\n')) {
+      if (markerPattern.test(line.trim())) {
+        debug('detectPaneShellType: Tcl REPL detected', { paneId, marker, line: line.trim() });
+        return 'tclsh';
+      }
+    }
+  }
+
+  debug('detectPaneShellType: inconclusive', { paneId, marker });
+  return null;
+}
+
+async function resolveShellTypeWithDetection(paneId: string): Promise<ShellType> {
+  const override = shellConfig.paneOverrides.get(paneId);
+  if (override) {
+    return override;
+  }
+
+  const cached = paneDetectedShell.get(paneId);
+  if (cached) {
+    return cached;
+  }
+
+  const detected = await detectPaneShellType(paneId);
+  if (detected) {
+    paneDetectedShell.set(paneId, detected);
+    return detected;
+  }
+
+  return shellConfig.defaultType;
+}
 
 // Execute a command in a tmux pane and track its execution
 export async function executeCommand(paneId: string, command: string, rawMode?: boolean, noEnter?: boolean): Promise<string> {
   // Generate unique ID for this command execution
   const commandId = uuidv4();
 
-  const shellType = resolveShellType(paneId);
+  const shellType = (rawMode || noEnter)
+    ? resolveShellType(paneId)
+    : await resolveShellTypeWithDetection(paneId);
 
   const sequenceNumber = (!rawMode && !noEnter) ? (wrappedCommandSequenceCounter + 1) : undefined;
   debug('executeCommand: preparing', { paneId, command, rawMode, noEnter, shellType, sequenceNumber });
