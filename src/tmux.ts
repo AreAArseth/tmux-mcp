@@ -468,6 +468,44 @@ const activeCommands = new Map<string, CommandExecution>();
 
 const startMarkerBase = 'TMUX_MCP_START';
 const endMarkerBase = 'TMUX_MCP_DONE';
+
+/**
+ * Per-process session nonce embedded in completion markers.
+ *
+ * tmux panes (e.g. a long-lived fc_shell) outlive the MCP server process and
+ * retain old TMUX_MCP_START/DONE markers in their scrollback. The sequence
+ * counter resets to 0 on every server restart, so a fresh command can reuse a
+ * sequence number whose DONE marker is still sitting in the pane history. Since
+ * completion is inferred by scanning the entire scrollback, the stale DONE
+ * marker would falsely complete the new command (often with empty output,
+ * because the stale DONE precedes the fresh START). Tagging markers with a
+ * nonce that is unique to this server process makes a previous run's markers
+ * impossible to match, so only this process's own markers can complete a wait.
+ *
+ * Disabled (empty) under Vitest so existing fixtures keep the legacy
+ * TMUX_MCP_START_<seq> / TMUX_MCP_DONE_<exit>_<seq> format; tests that exercise
+ * the nonce set it explicitly via setSessionNonce.
+ */
+function generateSessionNonce(): string {
+  return `s${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`;
+}
+
+let sessionNonce: string = process.env.TMUX_MCP_SESSION_NONCE
+  ?? (process.env.VITEST ? '' : generateSessionNonce());
+
+export function getSessionNonce(): string {
+  return sessionNonce;
+}
+
+export function setSessionNonce(nonce: string): void {
+  sessionNonce = nonce;
+}
+
+// Marker infix that carries the nonce, e.g. "s12ab_" (empty when disabled).
+function markerNonceInfix(): string {
+  return sessionNonce ? `${sessionNonce}_` : '';
+}
+
 const DEFAULT_RESULT_LINES = 100; // default number of lines returned when output is large
 type OutputSliceOptions = { lines?: number; start?: number; end?: number };
 
@@ -669,14 +707,21 @@ export async function checkCommandStatus(commandId: string, options?: OutputSlic
   }
 
   // Build marker blocks keyed by sequence number.
+  // Markers are matched against the current process's session nonce only, so a
+  // previous server run's stale markers (which may reuse the same sequence
+  // number) can never complete this command. When the nonce is disabled the
+  // patterns fall back to the legacy nonce-less marker format.
+  const nonceInfixPattern = sessionNonce ? `${escapeRegExp(sessionNonce)}_` : '';
+  const startMarkerRegex = new RegExp(`^${startMarkerBase}_${nonceInfixPattern}(\\d+)$`);
+  const endMarkerRegex = new RegExp(`^${endMarkerBase}_(\\d+)_${nonceInfixPattern}(\\d+)$`);
   const linesArr = content.split('\n');
   interface Block { startLine?: number; endLine: number; exitCode: number; seq: number; }
   const blocksBySeq = new Map<number, Block>();
   let lastEndLine = -1;
   for (let i = 0; i < linesArr.length; i++) {
     const line = linesArr[i].trim();
-    // Start marker pattern: TMUX_MCP_START_<seq>
-    const startMatch = line.match(new RegExp(`^${startMarkerBase}_(\\d+)$`));
+    // Start marker pattern: TMUX_MCP_START_<nonce?>_<seq>
+    const startMatch = line.match(startMarkerRegex);
     if (startMatch) {
       const seq = parseInt(startMatch[1], 10);
       const existing = blocksBySeq.get(seq) || { endLine: -1, exitCode: -1, seq };
@@ -685,8 +730,8 @@ export async function checkCommandStatus(commandId: string, options?: OutputSlic
     debug('checkCommandStatus: start marker found', { seq, lineIndex: i, line });
       continue;
     }
-    // End marker pattern: TMUX_MCP_DONE_<exit>_<seq>
-    const endMatch = line.match(new RegExp(`^${endMarkerBase}_(\\d+)_([0-9]+)$`));
+    // End marker pattern: TMUX_MCP_DONE_<exit>_<nonce?>_<seq>
+    const endMatch = line.match(endMarkerRegex);
     if (endMatch) {
       const exitCode = parseInt(endMatch[1], 10);
       const seq = parseInt(endMatch[2], 10);
@@ -727,6 +772,18 @@ export async function checkCommandStatus(commandId: string, options?: OutputSlic
     const tail = linesArr.slice(-10).join('\n').trim();
     command.result = tail ? tail : '(no recent output)';
     debug('checkCommandStatus: end marker missing, still pending', { sequenceNumber, tailPreview: command.result });
+    return command;
+  }
+
+  // Defense-in-depth: a DONE marker that appears BEFORE this command's START
+  // marker is stale (left over from a prior run that reused the sequence
+  // number). The fresh command has started but not finished, so stay pending.
+  // (When the start marker is genuinely scrolled out, startLine is undefined
+  // and we fall through to normal completion handling.)
+  if (block.startLine !== undefined && block.endLine < block.startLine) {
+    const tail = linesArr.slice(-10).join('\n').trim();
+    command.result = tail ? tail : '(no recent output)';
+    debug('checkCommandStatus: stale end marker precedes fresh start, still pending', { sequenceNumber, startLine: block.startLine, endLine: block.endLine });
     return command;
   }
 
@@ -793,9 +850,10 @@ function buildWrappedCommand(command: string, shellType: ShellType, seq: number)
   // For fish, use braces to prevent variable name ambiguity (e.g., $status_1 would be interpreted as variable 'status_1')
   const exitVar = shellType === 'fish' ? '$status' : '$?';
   const fishExitWrapped = `{${exitVar}}`;
+  const nonceInfix = markerNonceInfix();
   const wrapped = shellType === 'fish'
-    ? `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_"${fishExitWrapped}"_${seq}"`
-    : `echo "${startMarkerBase}_${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${seq}"`;
+    ? `echo "${startMarkerBase}_${nonceInfix}${seq}"; ${command}; echo "${endMarkerBase}_"${fishExitWrapped}"_${nonceInfix}${seq}"`
+    : `echo "${startMarkerBase}_${nonceInfix}${seq}"; ${command}; echo "${endMarkerBase}_${exitVar}_${nonceInfix}${seq}"`;
   debug('buildWrappedCommand', { shellType, seq, wrapped });
   return wrapped;
 }
@@ -828,17 +886,18 @@ async function ensureTclshInitialized(paneId: string): Promise<void> {
 }
 
 async function sendTclshHelperDefinition(paneId: string): Promise<void> {
+  const nonceInfix = markerNonceInfix();
   const definitionCommand = [
     'namespace eval ::tmux_mcp {',
     'proc run {seq cmd} {',
-    'puts "' + startMarkerBase + '_${seq}"; flush stdout;',
+    'puts "' + startMarkerBase + '_' + nonceInfix + '${seq}"; flush stdout;',
     'set status [catch {uplevel #0 $cmd} result opts];',
     'if {$status == 0} {',
     'if {[info exists result] && $result ne ""} { puts $result; flush stdout }',
     '} else {',
     'if {[info exists opts(-errorinfo)]} { puts $opts(-errorinfo); flush stdout } else { puts $result; flush stdout }',
     '};',
-    'puts "' + endMarkerBase + '_${status}_${seq}"; flush stdout',
+    'puts "' + endMarkerBase + '_${status}_' + nonceInfix + '${seq}"; flush stdout',
     '}',
     '}'
   ].join(' ');
