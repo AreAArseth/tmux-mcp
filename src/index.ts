@@ -77,17 +77,19 @@ server.tool(
 // Find session by name - Tool
 server.tool(
   "find-session",
-  "Find a tmux session by name",
+  "Find tmux sessions by name. Tries an exact name match first, then a case-insensitive substring match, then a regular-expression match, so you can pass a partial name or pattern. Returns all matches.",
   {
-    name: z.string().describe("Name of the tmux session to find")
+    name: z.string().describe("Exact name, substring, or regular expression to match against session names")
   },
   async ({ name }) => {
     try {
-      const session = await tmux.findSessionByName(name);
+      const sessions = await tmux.findSessions(name);
       return {
         content: [{
           type: "text",
-          text: session ? JSON.stringify(session, null, 2) : `Session not found: ${name}`
+          text: sessions.length > 0
+            ? JSON.stringify(sessions.length === 1 ? sessions[0] : sessions, null, 2)
+            : `Session not found: ${name}`
         }]
       };
     } catch (error) {
@@ -164,21 +166,21 @@ server.tool(
   "Capture content from a tmux pane. Defaults to the last N lines, but you can provide tmux-style start/end offsets (like 0 and -) to walk the full scrollback.",
   {
     paneId: z.string().describe("ID of the tmux pane"),
-    lines: z.string().optional().describe("Number of trailing lines to capture when start/end offsets are omitted (defaults to 200)"),
-    start: z.string().optional().describe("tmux -S offset; use 0 for the oldest line or a negative value to offset from the bottom"),
-    end: z.string().optional().describe("tmux -E offset; use - for the newest line or 0 for the active cursor line"),
+    lines: z.union([z.string(), z.number()]).optional().describe("Number of trailing lines to capture when start/end offsets are omitted (defaults to 200). Accepts a number or numeric string."),
+    start: z.union([z.string(), z.number()]).optional().describe("tmux -S offset; use 0 for the oldest line or a negative value to offset from the bottom. Accepts a number or string."),
+    end: z.union([z.string(), z.number()]).optional().describe("tmux -E offset; use - for the newest line or 0 for the active cursor line. Accepts a number or string."),
     colors: z.boolean().optional().describe("Include color/escape sequences for text and background attributes in output")
   },
   async ({ paneId, lines, start, end, colors }) => {
     try {
-      // Parse lines parameter if provided
-      const parsedLines = lines !== undefined ? parseInt(lines, 10) : undefined;
+      // Accept lines as a number or numeric string and ignore non-positive values.
+      const parsedLines = tmux.coerceLineCount(lines, 0);
       const includeColors = colors ?? false;
       const options: tmux.CapturePaneOptions = {
         includeColors
       };
 
-      if (parsedLines !== undefined && !Number.isNaN(parsedLines) && parsedLines > 0) {
+      if (parsedLines > 0) {
         options.lines = parsedLines;
       }
 
@@ -421,7 +423,7 @@ server.tool(
 // Execute command in pane - Tool
 server.tool(
   "execute-command",
-  "Execute a command in a tmux pane and get results. Tcl REPLs (fc_shell, dc_shell, pt_shell, icc2_shell, tclsh) do NOT need rawMode: tracked mode auto-probes for Tcl, injects the tracking namespace, and pairs with wait-command-completion for immediate completion. Use rawMode=true only for true interactive edge cases (vim, less, btop); it disables status tracking and forces manual capture-pane polling. IMPORTANT: When rawMode=false (default), avoid heredoc syntax (cat << EOF) and other multi-line constructs as they conflict with command wrapping. For file writing, prefer: printf 'content\\n' > file, echo statements, or write to temp files instead",
+  "Execute a command in a tmux pane and get results. Tcl REPLs (fc_shell, dc_shell, pt_shell, icc2_shell, tclsh) do NOT need rawMode: tracked mode auto-probes for Tcl, injects the tracking namespace, and pairs with wait-command-completion for immediate completion. Use rawMode=true only for true interactive edge cases (vim, less, btop); it disables status tracking and forces manual capture-pane polling. IMPORTANT: When rawMode=false (default), avoid heredoc syntax (cat << EOF) and other multi-line constructs as they conflict with command wrapping. For file writing, prefer: printf 'content\\n' > file, echo statements, or write to temp files instead. For tracked Tcl REPLs the command is wrapped in braces ({command}); multi-word/multi-arg commands work fine, but the command must contain balanced braces (almost all Tcl does). For the rare command with unbalanced braces, use rawMode and verify with capture-pane.",
   {
     paneId: z.string().describe("ID of the tmux pane"),
     command: z.string().describe("Command to execute"),

@@ -63,7 +63,7 @@ The CLI flag only sets the server-wide default. You can still override individua
 
 ### Session & Window Management
 - `list-sessions` - List all active tmux sessions
-- `find-session` - Find a tmux session by name
+- `find-session` - Find tmux sessions by exact name, substring, or regex pattern
 - `create-session` - Create a new tmux session
 - `kill-session` - Kill a tmux session by ID
 - `list-windows` - List windows in a tmux session
@@ -72,7 +72,7 @@ The CLI flag only sets the server-wide default. You can still override individua
 
 ### Pane Management
 - `list-panes` - List panes in a tmux window
-- `capture-pane` - Capture content from a tmux pane
+- `capture-pane` - Capture content from a tmux pane (line count accepts a number or numeric string)
 - `split-pane` - Split a tmux pane horizontally or vertically
 - `kill-pane` - Kill a tmux pane by ID
 

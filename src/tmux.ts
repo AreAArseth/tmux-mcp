@@ -36,10 +36,23 @@ export interface TmuxPane {
 }
 
 export interface CapturePaneOptions {
-  lines?: number;
+  lines?: number | string;
   start?: string | number;
   end?: string | number;
   includeColors?: boolean;
+}
+
+/**
+ * Coerce a line-count input (accepted as either a number or a numeric string)
+ * into a number. Returns the provided fallback when the value is missing or
+ * not a positive integer, so callers can pass "40" or 40 interchangeably.
+ */
+export function coerceLineCount(value: number | string | undefined, fallback: number): number {
+  if (value === undefined || value === '') {
+    return fallback;
+  }
+  const numeric = typeof value === 'number' ? value : Number.parseInt(value, 10);
+  return Number.isNaN(numeric) ? fallback : numeric;
 }
 
 type CaptureIndexInfo =
@@ -195,6 +208,41 @@ export async function findSessionByName(name: string): Promise<TmuxSession | nul
 }
 
 /**
+ * Find sessions matching a query, trying progressively looser strategies so a
+ * caller does not need to know the exact session name:
+ *   1. exact name match
+ *   2. case-insensitive substring match
+ *   3. regular-expression match (when the query is a valid regex)
+ * Returns all matches for the first strategy that yields a result.
+ */
+export async function findSessions(query: string): Promise<TmuxSession[]> {
+  let sessions: TmuxSession[];
+  try {
+    sessions = await listSessions();
+  } catch (error) {
+    return [];
+  }
+
+  const exact = sessions.filter(session => session.name === query);
+  if (exact.length > 0) {
+    return exact;
+  }
+
+  const lowered = query.toLowerCase();
+  const substring = sessions.filter(session => session.name.toLowerCase().includes(lowered));
+  if (substring.length > 0) {
+    return substring;
+  }
+
+  try {
+    const pattern = new RegExp(query);
+    return sessions.filter(session => pattern.test(session.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * List windows in a session
  */
 export async function listWindows(sessionId: string): Promise<TmuxWindow[]> {
@@ -243,11 +291,12 @@ export async function listPanes(windowId: string): Promise<TmuxPane[]> {
  */
 export async function capturePaneContent(paneId: string, options: CapturePaneOptions = {}): Promise<string> {
   const {
-    lines = 200,
     start,
     end,
     includeColors = false
   } = options;
+  // Accept either a number or a numeric string (e.g. "40") for the line count.
+  const lines = coerceLineCount(options.lines, 200);
 
   // Determine start value for tmux capture
   // We'll use this to capture enough data, then slice accurately
