@@ -1,6 +1,6 @@
 {
   "name": "@arearseth/tmux-mcp",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "MCP Server for interfacing with tmux sessions",
   "type": "module",
   "main": "build/index.js",
