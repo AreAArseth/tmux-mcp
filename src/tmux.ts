@@ -469,6 +469,9 @@ function applyOutputSlicing(command: CommandExecution, options?: OutputSliceOpti
 
 // Track tclsh initialization per pane to keep terminal output minimal
 const tclshInitializedPanes = new Set<string>();
+// Track in-flight initialization so concurrent first-time commands share a
+// single helper definition instead of each queuing their own behind a busy shell.
+const tclshInitInFlight = new Map<string, Promise<void>>();
 const paneDetectedShell = new Map<string, ShellType>();
 let wrappedCommandSequenceCounter = 0; // incremented for each non-raw wrapped command (sequence numbers)
 
@@ -532,11 +535,18 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
   // Generate unique ID for this command execution
   const commandId = uuidv4();
 
+  // Reserve a sequence number synchronously, before any await. Concurrent
+  // executeCommand calls (e.g. probes fired while a long create_placement runs)
+  // otherwise interleave at the awaits below, read the same counter value, and
+  // receive duplicate sequence numbers. Since completion tracking keys on the
+  // sequence number, duplicates make two commands match the same DONE marker,
+  // causing false completions and cross-command output attribution.
+  const sequenceNumber = (!rawMode && !noEnter) ? ++wrappedCommandSequenceCounter : undefined;
+
   const shellType = (rawMode || noEnter)
     ? resolveShellType(paneId)
     : await resolveShellTypeWithDetection(paneId);
 
-  const sequenceNumber = (!rawMode && !noEnter) ? (wrappedCommandSequenceCounter + 1) : undefined;
   debug('executeCommand: preparing', { paneId, command, rawMode, noEnter, shellType, sequenceNumber });
   let fullCommand: string;
   if (rawMode || noEnter) {
@@ -552,9 +562,6 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
   }
 
   // Store command in tracking map
-  if (sequenceNumber) {
-    wrappedCommandSequenceCounter = sequenceNumber; // commit increment
-  }
   debug('executeCommand: sending keys', { paneId, fullCommand, noEnter });
 
   activeCommands.set(commandId, {
@@ -756,6 +763,22 @@ async function ensureTclshInitialized(paneId: string): Promise<void> {
     return;
   }
 
+  const pending = tclshInitInFlight.get(paneId);
+  if (pending) {
+    return pending;
+  }
+
+  const initPromise = sendTclshHelperDefinition(paneId);
+  tclshInitInFlight.set(paneId, initPromise);
+  try {
+    await initPromise;
+    tclshInitializedPanes.add(paneId);
+  } finally {
+    tclshInitInFlight.delete(paneId);
+  }
+}
+
+async function sendTclshHelperDefinition(paneId: string): Promise<void> {
   const definitionCommand = [
     'namespace eval ::tmux_mcp {',
     'proc run {seq cmd} {',
@@ -774,8 +797,6 @@ async function ensureTclshInitialized(paneId: string): Promise<void> {
 
   const escapedCommand = definitionCommand.replace(/'/g, "'\\''");
   await executeTmux(`send-keys -t '${paneId}' '${escapedCommand}' Enter`);
-
-  tclshInitializedPanes.add(paneId);
 }
 
 // Retrieve sliced command output after completion without re-parsing markers
