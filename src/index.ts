@@ -525,7 +525,8 @@ server.tool(
         content: [{
           type: "text",
           text: resultText
-        }]
+        }],
+        isError: command.status === 'error'
       };
     } catch (error) {
       return {
@@ -590,7 +591,8 @@ server.tool(
         content: [{
           type: 'text',
           text: meta.join('\n') + `\n\n--- Output ---\n${status.result || ''}`
-        }]
+        }],
+        isError: status.status === 'error'
       };
     } catch (error) {
       return { content: [{ type: 'text', text: `Error waiting for command: ${error}` }], isError: true };

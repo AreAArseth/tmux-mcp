@@ -104,6 +104,8 @@ interface CommandExecution {
   lineEndIndex?: number; // exclusive
   markerStartLost?: boolean; // true when start marker scrolled out but end marker found
   sequenceNumber?: number; // ordering among wrapped commands for pairing markers
+  wrappedCommand?: string; // exact command sent to tmux (for dispatch-failure detection)
+  paneScrollbackLinesAtSend?: number; // scrollback line count captured immediately before send
 }
 
 export const supportedShellTypes = ['bash', 'zsh', 'fish', 'tclsh'] as const;
@@ -648,6 +650,14 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
   debug('executeCommand: wrapped command', fullCommand);
   }
 
+  let paneScrollbackLinesAtSend: number | undefined;
+  if (!rawMode && !noEnter && shellType === 'tclsh') {
+    const scrollbackBeforeSend = await capturePaneContent(paneId, { lines: 0 });
+    paneScrollbackLinesAtSend = scrollbackBeforeSend.trim() === ''
+      ? 0
+      : scrollbackBeforeSend.split('\n').length;
+  }
+
   // Store command in tracking map
   debug('executeCommand: sending keys', { paneId, fullCommand, noEnter });
 
@@ -658,7 +668,9 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
     status: 'pending',
     startTime: new Date(),
     rawMode: rawMode || noEnter,
-    sequenceNumber
+    sequenceNumber,
+    wrappedCommand: rawMode || noEnter ? undefined : fullCommand,
+    paneScrollbackLinesAtSend
   });
 
   // Send the command to the tmux pane
@@ -760,6 +772,10 @@ export async function checkCommandStatus(commandId: string, options?: OutputSlic
 
   const block = sequenceNumber !== undefined ? blocksBySeq.get(sequenceNumber) : undefined;
   if (!block) {
+    const dispatchFailure = detectTclDispatchFailure(command, linesArr, nonceInfixPattern);
+    if (dispatchFailure) {
+      return finalizeDispatchFailure(command, dispatchFailure.errorLines, options);
+    }
     // Not completed yet; show tail snapshot
     const tail = linesArr.slice(-10).join('\n').trim();
     command.result = tail ? tail : '(no recent output)';
@@ -769,6 +785,10 @@ export async function checkCommandStatus(commandId: string, options?: OutputSlic
 
   // If end marker not yet observed (endLine < 0), keep pending and show tail preview
   if (block.endLine < 0) {
+    const dispatchFailure = detectTclDispatchFailure(command, linesArr, nonceInfixPattern);
+    if (dispatchFailure) {
+      return finalizeDispatchFailure(command, dispatchFailure.errorLines, options);
+    }
     const tail = linesArr.slice(-10).join('\n').trim();
     command.result = tail ? tail : '(no recent output)';
     debug('checkCommandStatus: end marker missing, still pending', { sequenceNumber, tailPreview: command.result });
@@ -862,6 +882,100 @@ function buildTclshCommand(command: string, seq: number): string {
   const wrapped = `::tmux_mcp::run ${seq} {${command}}`;
   debug('buildTclshCommand', { seq, wrapped });
   return wrapped;
+}
+
+const FC_ERROR_LINE = /^\s*Error:/;
+const SHELL_PROMPT_LINE = /^(?:fc_shell|dc_shell|pt_shell|icc2_shell|icc_shell)?>\s*$|^\%\s*$/;
+
+function findWrappedCommandLineIndex(
+  linesArr: string[],
+  wrappedCommand: string,
+  scanFromLine: number
+): number {
+  for (let i = linesArr.length - 1; i >= scanFromLine; i--) {
+    if (linesArr[i].includes(wrappedCommand)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function findStartMarkerLineIndex(
+  linesArr: string[],
+  sequenceNumber: number,
+  nonceInfixPattern: string
+): number {
+  const seqStartMarkerRegex = new RegExp(`^${startMarkerBase}_${nonceInfixPattern}${sequenceNumber}$`);
+  for (let i = linesArr.length - 1; i >= 0; i--) {
+    if (seqStartMarkerRegex.test(linesArr[i].trim())) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Detect shell-side rejections before ::tmux_mcp::run emits completion markers. */
+function detectTclDispatchFailure(
+  command: CommandExecution,
+  linesArr: string[],
+  nonceInfixPattern: string
+): { errorLines: string[] } | null {
+  const wrappedCommand = command.wrappedCommand;
+  const sequenceNumber = command.sequenceNumber;
+  if (!wrappedCommand?.startsWith('::tmux_mcp::run ') || sequenceNumber === undefined) {
+    return null;
+  }
+
+  const scanFromLine = command.paneScrollbackLinesAtSend ?? 0;
+  const cmdLineIdx = findWrappedCommandLineIndex(linesArr, wrappedCommand, scanFromLine);
+  if (cmdLineIdx < 0) {
+    return null;
+  }
+
+  if (findStartMarkerLineIndex(linesArr, sequenceNumber, nonceInfixPattern) >= cmdLineIdx) {
+    return null;
+  }
+
+  const seqStartMarkerRegex = new RegExp(`^${startMarkerBase}_${nonceInfixPattern}${sequenceNumber}$`);
+  const errorLines: string[] = [];
+
+  for (let i = cmdLineIdx + 1; i < linesArr.length; i++) {
+    const line = linesArr[i];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (seqStartMarkerRegex.test(trimmed)) {
+      return null;
+    }
+    if (FC_ERROR_LINE.test(line)) {
+      errorLines.push(trimmed);
+      continue;
+    }
+    if (errorLines.length > 0 && !SHELL_PROMPT_LINE.test(trimmed) && !trimmed.startsWith('TMUX_MCP_')) {
+      errorLines.push(trimmed);
+      continue;
+    }
+    if (SHELL_PROMPT_LINE.test(trimmed)) {
+      break;
+    }
+  }
+
+  return errorLines.length > 0 ? { errorLines } : null;
+}
+
+function finalizeDispatchFailure(
+  command: CommandExecution,
+  errorLines: string[],
+  options?: OutputSliceOptions
+): CommandExecution {
+  command.status = 'error';
+  command.exitCode = 1;
+  command.outputLines = errorLines;
+  applyOutputSlicing(command, options);
+  activeCommands.set(command.id, command);
+  debug('checkCommandStatus: dispatch failure detected', { commandId: command.id, errorLines });
+  return command;
 }
 
 

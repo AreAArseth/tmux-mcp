@@ -602,4 +602,37 @@ describe("tmux utilities", () => {
     expect(zshCmd).toContain('TMUX_MCP_DONE_$?_');
     expect(zshCmd).not.toContain('{$?}');
   });
+
+  it("reports fc_shell parse errors when tracked command never emits markers", async () => {
+    let captureCount = 0;
+    execMock.mockImplementation(async (command: string) => {
+      if (command.includes("capture-pane")) {
+        captureCount++;
+        if (captureCount === 1) {
+          return { stdout: "", stderr: "" };
+        }
+        return {
+          stdout: [
+            "fc_shell> ::tmux_mcp::run 1 {bad brace}}",
+            "Error: extra characters after close-brace",
+            "        Use error_info for more info. (CMD-013)",
+            "fc_shell>",
+          ].join("\n"),
+          stderr: ""
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    tmux.setShellConfig({ type: "tclsh", paneId: "%0" });
+
+    const commandId = await tmux.executeCommand("%0", "bad brace}");
+    const status = await tmux.checkCommandStatus(commandId);
+
+    expect(status?.status).toBe("error");
+    expect(status?.exitCode).toBe(1);
+    expect(status?.result).toContain("Error: extra characters after close-brace");
+    expect(status?.result).toContain("(CMD-013)");
+  });
 });

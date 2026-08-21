@@ -161,4 +161,42 @@ describe("completion marker isolation across sessions", () => {
     // previous session's error/completion.
     expect(status?.status).toBe("pending");
   });
+
+  it("does not report stale tcl dispatch errors from before this send", async () => {
+    let paneContent = "";
+    let captureCount = 0;
+    execMock.mockImplementation(async (command: string) => {
+      if (command.includes("capture-pane")) {
+        captureCount++;
+        if (captureCount === 1) {
+          paneContent = [
+            "fc_shell> ::tmux_mcp::run 1 {old bad cmd}",
+            "Error: extra characters after close-brace",
+            "        Use error_info for more info. (CMD-013)",
+            "fc_shell>",
+          ].join("\n");
+          return { stdout: paneContent, stderr: "" };
+        }
+        return { stdout: paneContent, stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const tmux = await import("../src/tmux.js");
+    tmux.setSessionNonce("run2");
+    tmux.setShellConfig({ type: "tclsh", paneId: "%20" });
+
+    const commandId = await tmux.executeCommand("%20", "puts TMUX_OK");
+
+    paneContent = [
+      "fc_shell> ::tmux_mcp::run 1 {old bad cmd}",
+      "Error: extra characters after close-brace",
+      "        Use error_info for more info. (CMD-013)",
+      "fc_shell>",
+      "fc_shell> ::tmux_mcp::run 1 {puts TMUX_OK}",
+    ].join("\n");
+
+    const status = await tmux.checkCommandStatus(commandId);
+    expect(status?.status).toBe("pending");
+  });
 });
